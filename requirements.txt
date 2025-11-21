@@ -1,5 +1,7 @@
 streamlit
 google-generativeai
-Pillow
+pillow
 PyPDF2
-pdf2image
+PyMuPDF
+requests
+numpy
