@@ -8,11 +8,7 @@ import PyPDF2
 import re
 import requests
 from urllib.parse import urlparse
-try:
-    from pdf2image import convert_from_bytes
-    PDF_IMAGE_SUPPORT = True
-except ImportError:
-    PDF_IMAGE_SUPPORT = False
+import fitz  # PyMuPDF for better PDF handling
 import numpy as np
 
 # Page configuration
@@ -161,11 +157,21 @@ def download_image_from_url(url):
     """Download image from URL"""
     try:
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=15, stream=True)
         response.raise_for_status()
-        image = Image.open(io.BytesIO(response.content))
+        
+        # Read the content
+        content = response.content
+        
+        # Try to open as image
+        image = Image.open(io.BytesIO(content))
+        
+        # Convert to RGB if necessary
+        if image.mode not in ('RGB', 'RGBA'):
+            image = image.convert('RGB')
+        
         return image
     except Exception as e:
         st.error(f"Error downloading image from {url}: {str(e)}")
@@ -179,45 +185,79 @@ def extract_urls_from_text(text):
 
 def is_image_url(url):
     """Check if URL points to an image"""
-    image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff']
+    image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.svg']
     parsed = urlparse(url)
     path = parsed.path.lower()
-    return any(path.endswith(ext) for ext in image_extensions)
+    
+    # Check extension
+    if any(path.endswith(ext) for ext in image_extensions):
+        return True
+    
+    # Check if URL contains image-related keywords
+    if any(keyword in url.lower() for keyword in ['image', 'img', 'photo', 'picture']):
+        return True
+    
+    return False
 
 def process_image(uploaded_file):
     """Process uploaded image file"""
     try:
         image = Image.open(uploaded_file)
+        if image.mode not in ('RGB', 'RGBA'):
+            image = image.convert('RGB')
         return image
     except Exception as e:
         st.error(f"Error processing image: {str(e)}")
         return None
 
 def extract_pdf_text(pdf_file):
-    """Extract text from PDF file"""
+    """Extract text from PDF file using PyMuPDF"""
     try:
         pdf_file.seek(0)
-        pdf_reader = PyPDF2.PdfReader(pdf_file)
+        pdf_bytes = pdf_file.read()
+        
+        # Open PDF with PyMuPDF
+        pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
+        
         text = ""
-        for page_num, page in enumerate(pdf_reader.pages):
+        for page_num in range(len(pdf_document)):
+            page = pdf_document[page_num]
             text += f"\n--- Page {page_num + 1} ---\n"
-            text += page.extract_text()
+            text += page.get_text()
+        
+        pdf_document.close()
         return text
     except Exception as e:
         st.error(f"Error extracting PDF text: {str(e)}")
         return None
 
-def extract_pdf_images(pdf_file):
-    """Extract images from PDF file as page screenshots"""
-    if not PDF_IMAGE_SUPPORT:
-        return []
-    
+def extract_pdf_images_pymupdf(pdf_file):
+    """Extract images from PDF file using PyMuPDF"""
     try:
         pdf_file.seek(0)
-        images = convert_from_bytes(pdf_file.read(), dpi=200, fmt='PNG')
+        pdf_bytes = pdf_file.read()
+        
+        # Open PDF with PyMuPDF
+        pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
+        
+        images = []
+        for page_num in range(min(len(pdf_document), 10)):  # Limit to 10 pages
+            page = pdf_document[page_num]
+            
+            # Render page to image at high resolution
+            mat = fitz.Matrix(2.0, 2.0)  # 2x zoom for better quality
+            pix = page.get_pixmap(matrix=mat)
+            
+            # Convert to PIL Image
+            img_data = pix.tobytes("png")
+            image = Image.open(io.BytesIO(img_data))
+            
+            images.append(image)
+        
+        pdf_document.close()
         return images
     except Exception as e:
-        st.warning(f"Could not extract images from PDF: {str(e)}")
+        st.error(f"Error extracting PDF images: {str(e)}")
         return []
 
 def extract_figure_references(text):
@@ -264,16 +304,24 @@ def get_gemini_response(prompt, images=None, pdf_files=None):
         # Extract and download images from URLs in the prompt
         urls = extract_urls_from_text(prompt)
         url_images = []
+        
         for url in urls:
-            if is_image_url(url):
+            # Try to download any URL as an image, not just obvious image URLs
+            try:
                 img = download_image_from_url(url)
                 if img:
-                    url_images.append((img, f"Image from URL: {url}"))
+                    url_images.append((img, f"Image from: {url[:50]}..."))
+                    st.info(f"Successfully downloaded image from URL")
+            except:
+                # If it's likely an image URL but failed, try alternative methods
+                if is_image_url(url):
+                    st.warning(f"Could not download image from: {url}")
         
         # Add PDF text and extract images if provided
         figure_refs = []
         if pdf_files:
             for pdf_file in pdf_files:
+                # Extract text
                 pdf_file.seek(0)
                 pdf_text = extract_pdf_text(pdf_file)
                 if pdf_text:
@@ -286,9 +334,10 @@ def get_gemini_response(prompt, images=None, pdf_files=None):
                 
                 # Extract images from PDF
                 pdf_file.seek(0)
-                pdf_imgs = extract_pdf_images(pdf_file)
+                pdf_imgs = extract_pdf_images_pymupdf(pdf_file)
                 if pdf_imgs:
                     pdf_images_list.extend(pdf_imgs)
+                    st.success(f"Extracted {len(pdf_imgs)} pages from PDF as images")
         
         # Add instruction for image analysis
         total_image_count = len(images or []) + len(url_images) + len(pdf_images_list)
@@ -324,6 +373,10 @@ def get_gemini_response(prompt, images=None, pdf_files=None):
         return response.text, all_images, figure_refs
     
     except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        st.error(f"Error generating response: {str(e)}")
+        st.error(f"Details: {error_details}")
         return f"Error generating response: {str(e)}", None, None
 
 def display_message(message, is_user=False):
@@ -357,7 +410,7 @@ def display_message(message, is_user=False):
             # Create columns for images
             num_images = len(message['response_images'])
             if num_images > 0:
-                cols_per_row = min(num_images, 3)
+                cols_per_row = min(num_images, 2)
                 
                 for i in range(0, num_images, cols_per_row):
                     cols = st.columns(cols_per_row)
@@ -421,8 +474,8 @@ def main():
             st.markdown("""
             **Image Display:**
             - Shows analyzed images in responses
-            - Downloads images from URLs
-            - Extracts images from PDFs
+            - Downloads images from URLs (paste any image URL)
+            - Extracts images from PDFs (uses PyMuPDF)
             - References specific image regions
             - Visual correlation with analysis
             
@@ -433,7 +486,7 @@ def main():
             
             **Supported:**
             - Direct image uploads
-            - Image URLs in messages
+            - Image URLs in messages (just paste the URL)
             - PDF papers with figures
             """)
         
@@ -471,18 +524,14 @@ def main():
         
         st.markdown("---")
         
-        # PDF image extraction notice
-        if not PDF_IMAGE_SUPPORT:
-            st.warning("Install pdf2image for PDF image extraction:\n```pip install pdf2image```")
-        else:
-            st.success("PDF image extraction enabled")
+        st.success("PDF image extraction enabled (PyMuPDF)")
         
-        st.caption("SolidAdditive AI v2.1 - Fixed Image Display")
+        st.caption("SolidAdditive AI v3.0 - PyMuPDF Edition")
     
     # Main content area
     st.title("SolidAdditive AI")
     st.markdown("**Specialized in Cold Spray, UAM, FSAM, AFSD and other solid-state processes**")
-    st.markdown("*Now with working image display from URLs and PDFs!*")
+    st.markdown("*Now with PyMuPDF for better PDF handling and URL image support*")
     
     # Check if API is configured
     if not st.session_state.api_key:
@@ -524,7 +573,7 @@ def main():
         <div style='background-color: rgba(255, 255, 255, 0.1); padding: 2rem; border-radius: 0.5rem; color: white; text-align: center;'>
         <h2>Welcome to SolidAdditive AI</h2>
         <p>Ask questions about solid-state additive manufacturing processes, upload images for analysis, or submit research papers for review.</p>
-        <p><strong>NEW: Images from URLs and PDFs are now properly displayed!</strong></p>
+        <p><strong>NEW: Paste image URLs directly in your message!</strong></p>
         </div>
         """, unsafe_allow_html=True)
         
@@ -585,7 +634,7 @@ def main():
     
     # Chat input
     st.markdown("<br>", unsafe_allow_html=True)
-    user_input = st.chat_input("Ask about solid-state AM processes or paste image URLs...")
+    user_input = st.chat_input("Ask about solid-state AM or paste image URLs...")
     
     if user_input:
         # Process uploaded files
