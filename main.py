@@ -6,6 +6,8 @@ import base64
 from datetime import datetime
 import PyPDF2
 import re
+import requests
+from urllib.parse import urlparse
 try:
     from pdf2image import convert_from_bytes
     PDF_IMAGE_SUPPORT = True
@@ -142,7 +144,7 @@ def configure_gemini(api_key):
     try:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel(
-            'gemini-2.5-flash',
+            'gemini-2.0-flash-exp',
             generation_config={
                 'temperature': 0.7,
                 'top_p': 0.95,
@@ -154,6 +156,33 @@ def configure_gemini(api_key):
     except Exception as e:
         st.error(f"Error configuring API: {str(e)}")
         return None
+
+def download_image_from_url(url):
+    """Download image from URL"""
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        image = Image.open(io.BytesIO(response.content))
+        return image
+    except Exception as e:
+        st.error(f"Error downloading image from {url}: {str(e)}")
+        return None
+
+def extract_urls_from_text(text):
+    """Extract URLs from text"""
+    url_pattern = r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
+    urls = re.findall(url_pattern, text)
+    return urls
+
+def is_image_url(url):
+    """Check if URL points to an image"""
+    image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff']
+    parsed = urlparse(url)
+    path = parsed.path.lower()
+    return any(path.endswith(ext) for ext in image_extensions)
 
 def process_image(uploaded_file):
     """Process uploaded image file"""
@@ -167,6 +196,7 @@ def process_image(uploaded_file):
 def extract_pdf_text(pdf_file):
     """Extract text from PDF file"""
     try:
+        pdf_file.seek(0)
         pdf_reader = PyPDF2.PdfReader(pdf_file)
         text = ""
         for page_num, page in enumerate(pdf_reader.pages):
@@ -184,7 +214,7 @@ def extract_pdf_images(pdf_file):
     
     try:
         pdf_file.seek(0)
-        images = convert_from_bytes(pdf_file.read(), dpi=150, fmt='PNG')
+        images = convert_from_bytes(pdf_file.read(), dpi=200, fmt='PNG')
         return images
     except Exception as e:
         st.warning(f"Could not extract images from PDF: {str(e)}")
@@ -218,63 +248,80 @@ def create_image_with_label(image, label):
     except Exception as e:
         return image
 
-def get_gemini_response(prompt, images=None, pdf_files=None, pdf_images=None):
+def get_gemini_response(prompt, images=None, pdf_files=None):
     """Get response from Gemini API with multimodal support"""
     try:
         if not st.session_state.model:
             return "Please configure your API key first.", None, None
         
         content_parts = []
+        all_images = []
+        pdf_images_list = []
         
         # Build comprehensive prompt
         full_prompt = f"{SOLID_STATE_CONTEXT}\n\nUser Query: {prompt}"
         
-        # Add PDF text if provided
-        if pdf_files:
-            for pdf_file in pdf_files:
-                pdf_text = extract_pdf_text(pdf_file)
-                if pdf_text:
-                    full_prompt += f"\n\nPDF Document Content:\n{pdf_text[:50000]}"
-                    # Extract figure references
-                    fig_refs = extract_figure_references(pdf_text)
-                    if fig_refs:
-                        full_prompt += f"\n\nFigures mentioned in this paper: {', '.join(fig_refs)}"
+        # Extract and download images from URLs in the prompt
+        urls = extract_urls_from_text(prompt)
+        url_images = []
+        for url in urls:
+            if is_image_url(url):
+                img = download_image_from_url(url)
+                if img:
+                    url_images.append((img, f"Image from URL: {url}"))
         
-        # Add instruction for image analysis
-        if images or pdf_images:
-            full_prompt += "\n\nIMPORTANT: When analyzing images, provide detailed descriptions of specific regions, features, and characteristics. Reference specific areas like 'in the upper left region', 'at the interface shown', 'the grain structure in the center', etc. If multiple images are provided, specify which image you're discussing."
-        
-        content_parts.append(full_prompt)
-        
-        # Add uploaded images
-        if images:
-            for idx, img in enumerate(images):
-                content_parts.append(img)
-        
-        # Add PDF images
-        if pdf_images:
-            for idx, img in enumerate(pdf_images):
-                content_parts.append(img)
-        
-        # Generate response
-        response = st.session_state.model.generate_content(content_parts)
-        
-        # Return response text, images to display, and figure references
-        response_images = []
-        if images:
-            response_images.extend([(img, f"Uploaded Image {i+1}") for i, img in enumerate(images)])
-        if pdf_images:
-            response_images.extend([(img, f"PDF Page {i+1}") for i, img in enumerate(pdf_images)])
-        
+        # Add PDF text and extract images if provided
         figure_refs = []
         if pdf_files:
             for pdf_file in pdf_files:
                 pdf_file.seek(0)
                 pdf_text = extract_pdf_text(pdf_file)
                 if pdf_text:
-                    figure_refs = extract_figure_references(pdf_text)
+                    full_prompt += f"\n\nPDF Document Content:\n{pdf_text[:50000]}"
+                    # Extract figure references
+                    fig_refs = extract_figure_references(pdf_text)
+                    if fig_refs:
+                        figure_refs.extend(fig_refs)
+                        full_prompt += f"\n\nFigures mentioned in this paper: {', '.join(fig_refs)}"
+                
+                # Extract images from PDF
+                pdf_file.seek(0)
+                pdf_imgs = extract_pdf_images(pdf_file)
+                if pdf_imgs:
+                    pdf_images_list.extend(pdf_imgs)
         
-        return response.text, response_images, figure_refs
+        # Add instruction for image analysis
+        total_image_count = len(images or []) + len(url_images) + len(pdf_images_list)
+        if total_image_count > 0:
+            full_prompt += f"\n\nIMPORTANT: There are {total_image_count} images provided with this query. When analyzing images, provide detailed descriptions of specific regions, features, and characteristics. Reference specific areas like 'in the upper left region', 'at the interface shown', 'the grain structure in the center', etc. Specify which image you're discussing (e.g., 'In Image 1...', 'In the PDF page 2...')."
+        
+        content_parts.append(full_prompt)
+        
+        # Add all images to content and tracking
+        image_counter = 1
+        
+        # Add uploaded images
+        if images:
+            for img in images:
+                content_parts.append(img)
+                all_images.append((img, f"Uploaded Image {image_counter}"))
+                image_counter += 1
+        
+        # Add URL images
+        for img, label in url_images:
+            content_parts.append(img)
+            all_images.append((img, label))
+        
+        # Add PDF images
+        if pdf_images_list:
+            for idx, img in enumerate(pdf_images_list):
+                content_parts.append(img)
+                all_images.append((img, f"PDF Page {idx + 1}"))
+        
+        # Generate response
+        response = st.session_state.model.generate_content(content_parts)
+        
+        return response.text, all_images, figure_refs
     
     except Exception as e:
         return f"Error generating response: {str(e)}", None, None
@@ -294,7 +341,7 @@ def display_message(message, is_user=False):
             cols = st.columns(min(len(message['files']), 4))
             for idx, file_info in enumerate(message['files']):
                 with cols[idx % 4]:
-                    if file_info['type'].startswith('image'):
+                    if file_info['type'].startswith('image') and file_info['data'] is not None:
                         st.image(file_info['data'], caption=file_info['name'], width=150)
                     else:
                         st.text(f"[PDF] {file_info['name']}")
@@ -309,11 +356,17 @@ def display_message(message, is_user=False):
             
             # Create columns for images
             num_images = len(message['response_images'])
-            cols = st.columns(min(num_images, 3))
-            
-            for idx, (img, label) in enumerate(message['response_images']):
-                with cols[idx % 3]:
-                    st.image(img, caption=label, use_container_width=True)
+            if num_images > 0:
+                cols_per_row = min(num_images, 3)
+                
+                for i in range(0, num_images, cols_per_row):
+                    cols = st.columns(cols_per_row)
+                    for j in range(cols_per_row):
+                        idx = i + j
+                        if idx < num_images:
+                            img, label = message['response_images'][idx]
+                            with cols[j]:
+                                st.image(img, caption=label, use_column_width=True)
         
         # Display figure references
         if not is_user and 'figure_refs' in message and message['figure_refs']:
@@ -367,15 +420,21 @@ def main():
         with st.expander("Enhanced Features"):
             st.markdown("""
             **Image Display:**
-            - AI shows analyzed images in responses
+            - Shows analyzed images in responses
+            - Downloads images from URLs
+            - Extracts images from PDFs
             - References specific image regions
-            - Displays figures from papers
             - Visual correlation with analysis
             
             **Figure Extraction:**
             - Extracts figure references from papers
             - Shows PDF pages as images
             - Links analysis to visual content
+            
+            **Supported:**
+            - Direct image uploads
+            - Image URLs in messages
+            - PDF papers with figures
             """)
         
         st.markdown("---")
@@ -387,6 +446,10 @@ def main():
             - "Analyze this microstructure image"
             - "Identify defects in the uploaded image"
             - "What process created this structure?"
+            
+            **With URLs:**
+            - "Analyze this image: [paste image URL]"
+            - "Compare these microstructures: [URL1] [URL2]"
             
             **With Papers:**
             - "Show me the figures from this paper"
@@ -410,14 +473,16 @@ def main():
         
         # PDF image extraction notice
         if not PDF_IMAGE_SUPPORT:
-            st.warning("Install pdf2image for PDF image extraction: pip install pdf2image")
+            st.warning("Install pdf2image for PDF image extraction:\n```pip install pdf2image```")
+        else:
+            st.success("PDF image extraction enabled")
         
-        st.caption("SolidAdditive AI v2.0 - Enhanced Image Display")
+        st.caption("SolidAdditive AI v2.1 - Fixed Image Display")
     
     # Main content area
-    st.title("SolidAdditive AI - An Agentic AI Model for Solid-state Additive Manufacturing Processes")
+    st.title("SolidAdditive AI")
     st.markdown("**Specialized in Cold Spray, UAM, FSAM, AFSD and other solid-state processes**")
-    st.markdown("*Now with enhanced image display and figure extraction*")
+    st.markdown("*Now with working image display from URLs and PDFs!*")
     
     # Check if API is configured
     if not st.session_state.api_key:
@@ -444,7 +509,7 @@ def main():
             <h3>Enhanced Capabilities:</h3>
             <ul>
             <li>AI shows images in responses</li>
-            <li>References specific image regions</li>
+            <li>Downloads images from URLs</li>
             <li>Extracts figures from papers</li>
             <li>Visual analysis correlation</li>
             <li>Figure reference tracking</li>
@@ -459,7 +524,7 @@ def main():
         <div style='background-color: rgba(255, 255, 255, 0.1); padding: 2rem; border-radius: 0.5rem; color: white; text-align: center;'>
         <h2>Welcome to SolidAdditive AI</h2>
         <p>Ask questions about solid-state additive manufacturing processes, upload images for analysis, or submit research papers for review.</p>
-        <p><strong>NEW: Images and figures are now displayed in AI responses!</strong></p>
+        <p><strong>NEW: Images from URLs and PDFs are now properly displayed!</strong></p>
         </div>
         """, unsafe_allow_html=True)
         
@@ -480,7 +545,7 @@ def main():
             st.markdown("""
             <div class="info-box">
             <h4>Image Analysis</h4>
-            <p>Upload microstructures - AI will show and reference specific regions in analysis</p>
+            <p>Upload images or paste URLs - AI will show and reference specific regions</p>
             </div>
             """, unsafe_allow_html=True)
         
@@ -488,7 +553,7 @@ def main():
             st.markdown("""
             <div class="info-box">
             <h4>Paper Review</h4>
-            <p>Submit PDFs - AI extracts figures and references them in explanations</p>
+            <p>Submit PDFs - AI extracts pages as images and references them</p>
             </div>
             """, unsafe_allow_html=True)
     
@@ -520,13 +585,12 @@ def main():
     
     # Chat input
     st.markdown("<br>", unsafe_allow_html=True)
-    user_input = st.chat_input("Ask about solid-state AM processes (CSAM, UAM, FSAM, AFSD)...")
+    user_input = st.chat_input("Ask about solid-state AM processes or paste image URLs...")
     
     if user_input:
         # Process uploaded files
         images = []
         pdf_files = []
-        pdf_images = []
         file_info = []
         
         if uploaded_files:
@@ -548,12 +612,6 @@ def main():
                         'type': file.type,
                         'data': None
                     })
-                    # Extract images from PDF
-                    if PDF_IMAGE_SUPPORT:
-                        file.seek(0)
-                        pdf_imgs = extract_pdf_images(file)
-                        if pdf_imgs:
-                            pdf_images.extend(pdf_imgs[:5])  # Limit to first 5 pages
         
         # Add user message
         user_message = {
@@ -565,12 +623,11 @@ def main():
         st.session_state.messages.append(user_message)
         
         # Get AI response with enhanced image display
-        with st.spinner("Analyzing..."):
+        with st.spinner("Analyzing (downloading images, extracting PDF content)..."):
             ai_response, response_images, figure_refs = get_gemini_response(
                 user_input, 
                 images=images if images else None, 
-                pdf_files=pdf_files if pdf_files else None,
-                pdf_images=pdf_images if pdf_images else None
+                pdf_files=pdf_files if pdf_files else None
             )
         
         # Add assistant message with images
