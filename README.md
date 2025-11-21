@@ -141,7 +141,7 @@ PyPDF2==3.0.1
 
 1. **Launch the Streamlit app**
 ```bash
-streamlit run solid_state_am_app.py
+streamlit run main.py
 ```
 
 2. **Configure Gemini API**
