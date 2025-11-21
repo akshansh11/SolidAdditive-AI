@@ -415,7 +415,7 @@ def main():
         st.caption("SolidAdditive AI v2.0 - Enhanced Image Display")
     
     # Main content area
-    st.title("SolidAdditive AI - Research Assistant")
+    st.title("SolidAdditive AI - An Agentic AI Model for Solid-state Additive Manufacturing Processes")
     st.markdown("**Specialized in Cold Spray, UAM, FSAM, AFSD and other solid-state processes**")
     st.markdown("*Now with enhanced image display and figure extraction*")
     
