@@ -7,9 +7,10 @@ from datetime import datetime
 import PyPDF2
 import re
 import requests
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote
 import fitz  # PyMuPDF for better PDF handling
 import numpy as np
+import json
 
 # Page configuration
 st.set_page_config(
@@ -118,7 +119,7 @@ When answering queries:
 3. Reference material properties, process parameters, and applications
 4. Discuss advantages over fusion-based methods when relevant
 5. Include information about microstructure, mechanical properties, and process optimization
-6. If images are uploaded, analyze them in the context of solid-state AM only
+6. If images are provided, analyze them in the context of solid-state AM only
 7. When analyzing images, describe specific regions, features, and characteristics
 8. Reference figure numbers when discussing content from papers
 9. Provide detailed visual descriptions that can be correlated with displayed images
@@ -153,11 +154,39 @@ def configure_gemini(api_key):
         st.error(f"Error configuring API: {str(e)}")
         return None
 
+def search_images_google(query, num_images=3):
+    """Search for images using Google Custom Search API or scraping"""
+    try:
+        # Use Bing Image Search as it's more accessible
+        search_url = f"https://www.bing.com/images/search?q={quote(query)}&form=HDRSC2"
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        
+        response = requests.get(search_url, headers=headers, timeout=10)
+        
+        # Extract image URLs from the response
+        image_urls = re.findall(r'"murl":"([^"]+)"', response.text)
+        
+        if image_urls:
+            return image_urls[:num_images]
+        else:
+            # Fallback: try to find direct image links
+            image_urls = re.findall(r'https?://[^\s<>"]+?\.(?:jpg|jpeg|png|gif|webp)', response.text)
+            return list(set(image_urls))[:num_images]
+    except Exception as e:
+        st.warning(f"Could not search for images: {str(e)}")
+        return []
+
 def download_image_from_url(url):
     """Download image from URL"""
     try:
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Accept-Language': 'en-US,en;q=0.9',
         }
         response = requests.get(url, headers=headers, timeout=15, stream=True)
         response.raise_for_status()
@@ -174,7 +203,6 @@ def download_image_from_url(url):
         
         return image
     except Exception as e:
-        st.error(f"Error downloading image from {url}: {str(e)}")
         return None
 
 def extract_urls_from_text(text):
@@ -198,6 +226,42 @@ def is_image_url(url):
         return True
     
     return False
+
+def should_search_images(prompt):
+    """Determine if the prompt is asking to display/show/find images"""
+    keywords = [
+        'display image', 'show image', 'show me image', 'display picture',
+        'show picture', 'find image', 'get image', 'fetch image',
+        'can you display', 'can you show', 'show an image', 'display an image',
+        'show diagram', 'display diagram', 'show schematic', 'display schematic',
+        'show equipment', 'display equipment', 'show setup', 'display setup'
+    ]
+    
+    prompt_lower = prompt.lower()
+    return any(keyword in prompt_lower for keyword in keywords)
+
+def extract_search_query(prompt):
+    """Extract what to search for from the prompt"""
+    prompt_lower = prompt.lower()
+    
+    # Common patterns
+    patterns = [
+        r'(?:display|show|find|get|fetch)\s+(?:an?\s+)?image\s+(?:of|for)\s+(.+?)(?:\?|$|\.)',
+        r'(?:display|show|find|get|fetch)\s+(.+?)\s+image',
+        r'can you (?:display|show)\s+(?:an?\s+)?image\s+(?:of|for)\s+(.+?)(?:\?|$|\.)',
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, prompt_lower)
+        if match:
+            return match.group(1).strip()
+    
+    # If no pattern matches, try to extract the main subject
+    # Remove common words
+    words = prompt_lower.split()
+    search_words = [w for w in words if w not in ['can', 'you', 'display', 'show', 'image', 'of', 'an', 'a', 'the', '?', '.']]
+    
+    return ' '.join(search_words[:5])  # Take first 5 meaningful words
 
 def process_image(uploaded_file):
     """Process uploaded image file"""
@@ -301,21 +365,34 @@ def get_gemini_response(prompt, images=None, pdf_files=None):
         # Build comprehensive prompt
         full_prompt = f"{SOLID_STATE_CONTEXT}\n\nUser Query: {prompt}"
         
-        # Extract and download images from URLs in the prompt
-        urls = extract_urls_from_text(prompt)
-        url_images = []
-        
-        for url in urls:
-            # Try to download any URL as an image, not just obvious image URLs
-            try:
+        # Check if user is asking to display/show images
+        if should_search_images(prompt) and not images and not pdf_files:
+            search_query = extract_search_query(prompt)
+            st.info(f"Searching for images: {search_query}")
+            
+            # Search for images
+            image_urls = search_images_google(search_query, num_images=3)
+            
+            url_images = []
+            for url in image_urls[:3]:  # Try up to 3 images
+                img = download_image_from_url(url)
+                if img:
+                    url_images.append((img, f"Search result: {url[:60]}..."))
+                    st.success(f"Downloaded image from search")
+            
+            if not url_images:
+                st.warning("Could not find images from search. Try providing a direct image URL.")
+        else:
+            # Extract and download images from URLs in the prompt
+            urls = extract_urls_from_text(prompt)
+            url_images = []
+            
+            for url in urls:
+                # Try to download any URL as an image
                 img = download_image_from_url(url)
                 if img:
                     url_images.append((img, f"Image from: {url[:50]}..."))
                     st.info(f"Successfully downloaded image from URL")
-            except:
-                # If it's likely an image URL but failed, try alternative methods
-                if is_image_url(url):
-                    st.warning(f"Could not download image from: {url}")
         
         # Add PDF text and extract images if provided
         figure_refs = []
@@ -342,7 +419,7 @@ def get_gemini_response(prompt, images=None, pdf_files=None):
         # Add instruction for image analysis
         total_image_count = len(images or []) + len(url_images) + len(pdf_images_list)
         if total_image_count > 0:
-            full_prompt += f"\n\nIMPORTANT: There are {total_image_count} images provided with this query. When analyzing images, provide detailed descriptions of specific regions, features, and characteristics. Reference specific areas like 'in the upper left region', 'at the interface shown', 'the grain structure in the center', etc. Specify which image you're discussing (e.g., 'In Image 1...', 'In the PDF page 2...')."
+            full_prompt += f"\n\nIMPORTANT: There are {total_image_count} images provided with this query. Analyze these images in detail. When analyzing images, provide detailed descriptions of specific regions, features, and characteristics. Reference specific areas like 'in the upper left region', 'at the interface shown', 'the grain structure in the center', etc. Specify which image you're discussing (e.g., 'In Image 1...', 'In the PDF page 2...')."
         
         content_parts.append(full_prompt)
         
@@ -474,7 +551,8 @@ def main():
             st.markdown("""
             **Image Display:**
             - Shows analyzed images in responses
-            - Downloads images from URLs (paste any image URL)
+            - SEARCHES and downloads images when you ask
+            - Downloads images from URLs
             - Extracts images from PDFs (uses PyMuPDF)
             - References specific image regions
             - Visual correlation with analysis
@@ -488,6 +566,7 @@ def main():
             - Direct image uploads
             - Image URLs in messages (just paste the URL)
             - PDF papers with figures
+            - "Show me image of CSAM" - will search and display!
             """)
         
         st.markdown("---")
@@ -495,7 +574,13 @@ def main():
         # Example queries
         with st.expander("Example Questions"):
             st.markdown("""
-            **With Images:**
+            **Ask AI to Find Images:**
+            - "Can you display image of CSAM?"
+            - "Show me CSAM microstructure"
+            - "Display AFSD equipment setup"
+            - "Show diagram of cold spray process"
+            
+            **With Uploaded Images:**
             - "Analyze this microstructure image"
             - "Identify defects in the uploaded image"
             - "What process created this structure?"
@@ -525,13 +610,14 @@ def main():
         st.markdown("---")
         
         st.success("PDF image extraction enabled (PyMuPDF)")
+        st.success("Web image search enabled")
         
-        st.caption("SolidAdditive AI v3.0 - PyMuPDF Edition")
+        st.caption("SolidAdditive AI v4.0 - With Image Search!")
     
     # Main content area
     st.title("SolidAdditive AI")
     st.markdown("**Specialized in Cold Spray, UAM, FSAM, AFSD and other solid-state processes**")
-    st.markdown("*Now with PyMuPDF for better PDF handling and URL image support*")
+    st.markdown("*Now with automatic image search - just ask to display images!*")
     
     # Check if API is configured
     if not st.session_state.api_key:
@@ -557,6 +643,7 @@ def main():
             <div class="info-box">
             <h3>Enhanced Capabilities:</h3>
             <ul>
+            <li>AI SEARCHES for images automatically</li>
             <li>AI shows images in responses</li>
             <li>Downloads images from URLs</li>
             <li>Extracts figures from papers</li>
@@ -573,7 +660,7 @@ def main():
         <div style='background-color: rgba(255, 255, 255, 0.1); padding: 2rem; border-radius: 0.5rem; color: white; text-align: center;'>
         <h2>Welcome to SolidAdditive AI</h2>
         <p>Ask questions about solid-state additive manufacturing processes, upload images for analysis, or submit research papers for review.</p>
-        <p><strong>NEW: Paste image URLs directly in your message!</strong></p>
+        <p><strong>NEW: Just ask "Show me CSAM image" and I'll search and display it!</strong></p>
         </div>
         """, unsafe_allow_html=True)
         
@@ -585,8 +672,8 @@ def main():
         with col1:
             st.markdown("""
             <div class="info-box">
-            <h4>Process Questions</h4>
-            <p>Ask about CSAM, UAM, FSAM, AFSD parameters, mechanisms, and applications</p>
+            <h4>Ask for Images</h4>
+            <p>"Show me CSAM equipment" - AI will search and display images!</p>
             </div>
             """, unsafe_allow_html=True)
         
@@ -634,7 +721,7 @@ def main():
     
     # Chat input
     st.markdown("<br>", unsafe_allow_html=True)
-    user_input = st.chat_input("Ask about solid-state AM or paste image URLs...")
+    user_input = st.chat_input("Ask to 'show image of CSAM' or paste URLs...")
     
     if user_input:
         # Process uploaded files
@@ -672,7 +759,7 @@ def main():
         st.session_state.messages.append(user_message)
         
         # Get AI response with enhanced image display
-        with st.spinner("Analyzing (downloading images, extracting PDF content)..."):
+        with st.spinner("Analyzing (searching/downloading images, extracting PDF content)..."):
             ai_response, response_images, figure_refs = get_gemini_response(
                 user_input, 
                 images=images if images else None, 
