@@ -6,8 +6,6 @@ from datetime import datetime
 import re
 import requests
 import fitz  # PyMuPDF
-from serpapi import GoogleSearch
-import os
 
 # Page config
 st.set_page_config(
