@@ -838,7 +838,7 @@ def main():
         st.caption("⚠ CSAM • UAM • FSAM • AFSD Only")
     
     # Main content
-    st.title("SolidAdditive AI Pro")
+    st.title("SolidAdditive AI: An Agentic AI Model for Solid-State Additive Manufacturing")
     st.markdown("""
     <div style='background: rgba(255, 255, 255, 0.1); padding: 1rem; border-radius: 0.5rem; margin-bottom: 1rem;'>
         <p style='color: white; margin: 0;'>
