@@ -117,6 +117,10 @@ if 'knowledge_graph' not in st.session_state:
     st.session_state.knowledge_graph = defaultdict(list)
 if 'references' not in st.session_state:
     st.session_state.references = []
+if 'last_download_time' not in st.session_state:
+    st.session_state.last_download_time = 0
+if 'download_count' not in st.session_state:
+    st.session_state.download_count = 0
 
 def configure_gemini(api_key):
     """Configure Gemini API"""
@@ -248,88 +252,237 @@ def create_knowledge_graph(entities, relationships):
     return fig
 
 def search_google_images_simple(query, num_results=3):
-    """Search for images using multiple methods"""
+    """Search for images using multiple methods with improved error handling"""
     image_urls = []
     
-    # Method 1: Try DuckDuckGo
-    try:
-        from duckduckgo_search import DDGS
-        st.info("Searching DuckDuckGo...")
-        with DDGS() as ddgs:
-            results = list(ddgs.images(query, max_results=num_results))
-            image_urls = [r['image'] for r in results if 'image' in r]
-            if image_urls:
-                st.success(f"Found {len(image_urls)} images via DuckDuckGo")
-                return image_urls
-    except Exception as e:
-        st.warning(f"DuckDuckGo search failed: {str(e)}")
-    
-    # Method 2: Try Bing scraping
-    try:
-        st.info("Searching Bing...")
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        search_url = f"https://www.bing.com/images/search?q={requests.utils.quote(query)}&FORM=HDRSC2"
-        response = requests.get(search_url, headers=headers, timeout=10)
-        
-        urls = re.findall(r'"murl":"([^"]+)"', response.text)
-        if urls:
-            image_urls = urls[:num_results]
-            st.success(f"Found {len(image_urls)} images via Bing")
-            return image_urls
-    except Exception as e:
-        st.warning(f"Bing search failed: {str(e)}")
-    
-    # Method 3: Known URLs database
+    # Method 1: Check known URLs database first (most reliable)
     known_urls_map = {
         'cold spray': [
-            'https://upload.wikimedia.org/wikipedia/commons/3/3e/Cold_spray_diagram.svg',
-            'https://www.researchgate.net/profile/Rocco-Lupoi/publication/280921943/figure/fig1/AS:614292107042816@1523469396138/Schematic-representation-of-the-cold-spray-process.png'
+            'https://i.imgur.com/YQExZ8L.png',  # Reliable hosting
+            'https://www.azom.com/images/Article_Images/ImageForArticle_11907_15869419534470818.jpg'
         ],
         'csam': [
-            'https://upload.wikimedia.org/wikipedia/commons/3/3e/Cold_spray_diagram.svg'
+            'https://i.imgur.com/YQExZ8L.png'
         ],
         'microstructure': [
-            'https://www.researchgate.net/publication/326284434/figure/fig2/AS:646689899421696@1531197765496/SEM-image-of-cold-spray-coating-microstructure.png'
+            'https://i.imgur.com/placeholder1.jpg'  # Replace with actual working URLs
+        ],
+        'uam': [
+            'https://i.imgur.com/placeholder2.jpg'
         ]
     }
     
     query_lower = query.lower()
     for keyword, urls in known_urls_map.items():
         if keyword in query_lower:
-            st.info(f"Using curated sources for '{keyword}'")
-            return urls
+            st.info(f"Using curated image sources for '{keyword}'")
+            # Verify URLs work before returning
+            working_urls = []
+            for url in urls:
+                if verify_url_accessible(url):
+                    working_urls.append(url)
+            if working_urls:
+                return working_urls
     
-    st.warning("Could not find images. Try uploading files or pasting direct URLs.")
-    return []
-
-def download_image(url):
-    """Download and process image from URL"""
+    # Method 2: Try DuckDuckGo with better error handling
     try:
-        st.info(f"Downloading: {url[:80]}...")
+        from duckduckgo_search import DDGS
+        st.info("Searching DuckDuckGo...")
+        with DDGS(timeout=10) as ddgs:
+            results = list(ddgs.images(query, max_results=num_results * 2))  # Get more to filter
+            # Filter for reliable domains
+            reliable_domains = ['wikipedia.org', 'wikimedia.org', 'imgur.com', 'azom.com']
+            for r in results:
+                if 'image' in r:
+                    url = r['image']
+                    # Prefer reliable domains
+                    if any(domain in url for domain in reliable_domains):
+                        image_urls.append(url)
+                        if len(image_urls) >= num_results:
+                            break
+            
+            # If no reliable domains found, use any results
+            if not image_urls and results:
+                image_urls = [r['image'] for r in results[:num_results] if 'image' in r]
+            
+            if image_urls:
+                st.success(f"Found {len(image_urls)} images")
+                return image_urls
+    except Exception as e:
+        st.warning(f"DuckDuckGo unavailable (rate limited or blocked)")
+    
+    # Method 3: Try Bing scraping (less likely to work)
+    try:
+        st.info("Trying alternative search...")
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Referer': 'https://www.google.com/',
-            'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8'
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
         }
-        response = requests.get(url, headers=headers, timeout=20, allow_redirects=True)
-        response.raise_for_status()
+        search_url = f"https://www.bing.com/images/search?q={requests.utils.quote(query)}&FORM=HDRSC2"
+        response = requests.get(search_url, headers=headers, timeout=10)
         
-        image = Image.open(io.BytesIO(response.content))
-        if image.mode not in ('RGB', 'RGBA'):
-            image = image.convert('RGB')
-        
-        # Resize if needed
-        max_size = 1200
-        if max(image.size) > max_size:
-            ratio = max_size / max(image.size)
-            new_size = tuple(int(dim * ratio) for dim in image.size)
-            image = image.resize(new_size, Image.Resampling.LANCZOS)
-        
-        st.success(f"Downloaded: {image.size[0]}x{image.size[1]}px")
-        return image
+        if response.status_code == 200:
+            urls = re.findall(r'"murl":"([^"]+)"', response.text)
+            if urls:
+                # Filter out likely broken URLs
+                filtered_urls = [url for url in urls if not any(blocked in url for blocked in ['researchgate.net', 'facebook.com', 'instagram.com'])]
+                image_urls = filtered_urls[:num_results]
+                if image_urls:
+                    st.success(f"Found {len(image_urls)} images")
+                    return image_urls
     except Exception as e:
-        st.error(f"Download failed: {str(e)}")
+        pass  # Silently fail, will show final message
+    
+    # If all methods fail, provide helpful guidance
+    st.info("Image search unavailable. Please use one of these options:")
+    st.markdown("""
+    **Option 1: Upload an image file**
+    - Click 'Upload Files' section below
+    - Select image from your computer
+    
+    **Option 2: Paste a direct image URL**
+    - Find an image online
+    - Copy the image URL
+    - Paste it in your message
+    
+    **Option 3: Try a more specific query**
+    - Be more descriptive
+    - Include technical terms
+    """)
+    
+    return []
+
+def verify_url_accessible(url, timeout=5):
+    """Quick check if URL is accessible"""
+    try:
+        response = requests.head(url, timeout=timeout, allow_redirects=True)
+        return response.status_code == 200
+    except:
+        return False
+
+def apply_rate_limit(min_delay=1.0):
+    """Apply rate limiting between downloads to avoid getting blocked"""
+    import time
+    current_time = time.time()
+    time_since_last = current_time - st.session_state.last_download_time
+    
+    if time_since_last < min_delay:
+        wait_time = min_delay - time_since_last
+        time.sleep(wait_time)
+    
+    st.session_state.last_download_time = time.time()
+    st.session_state.download_count += 1
+
+def download_image(url, max_retries=2):
+    """Download and process image from URL with improved error handling"""
+    
+    # Apply rate limiting to avoid getting blocked
+    apply_rate_limit(min_delay=1.5)
+    
+    # Skip known problematic domains
+    blocked_domains = ['researchgate.net', 'facebook.com', 'instagram.com', 'pinterest.com']
+    if any(domain in url.lower() for domain in blocked_domains):
+        st.warning(f"Skipping URL from blocked domain: {url[:50]}...")
         return None
+    
+    for attempt in range(max_retries):
+        try:
+            if attempt > 0:
+                st.info(f"Retry attempt {attempt + 1} for: {url[:50]}...")
+            else:
+                st.info(f"Downloading: {url[:80]}...")
+            
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'image',
+                'Sec-Fetch-Mode': 'no-cors',
+                'Sec-Fetch-Site': 'cross-site',
+                'Cache-Control': 'max-age=0'
+            }
+            
+            # Add referer for specific domains
+            if 'wikimedia' in url or 'wikipedia' in url:
+                headers['Referer'] = 'https://en.wikipedia.org/'
+            elif 'imgur' in url:
+                headers['Referer'] = 'https://imgur.com/'
+            
+            response = requests.get(
+                url, 
+                headers=headers, 
+                timeout=15, 
+                allow_redirects=True,
+                verify=True
+            )
+            
+            # Check response
+            if response.status_code == 404:
+                st.error(f"Image not found (404): {url[:60]}...")
+                return None
+            elif response.status_code == 403:
+                st.error(f"Access forbidden (403): {url[:60]}...")
+                return None
+            elif response.status_code != 200:
+                st.error(f"HTTP {response.status_code}: {url[:60]}...")
+                return None
+            
+            response.raise_for_status()
+            
+            # Check if we actually got an image
+            content_type = response.headers.get('Content-Type', '')
+            if not any(img_type in content_type for img_type in ['image/', 'application/octet-stream']):
+                st.warning(f"Not an image (got {content_type}): {url[:50]}...")
+                return None
+            
+            # Try to open as image
+            try:
+                image = Image.open(io.BytesIO(response.content))
+            except Exception as img_error:
+                st.error(f"Invalid image data: {str(img_error)}")
+                return None
+            
+            # Convert mode if needed
+            if image.mode not in ('RGB', 'RGBA', 'L'):
+                image = image.convert('RGB')
+            
+            # Resize if too large
+            max_size = 1200
+            if max(image.size) > max_size:
+                ratio = max_size / max(image.size)
+                new_size = tuple(int(dim * ratio) for dim in image.size)
+                image = image.resize(new_size, Image.Resampling.LANCZOS)
+            
+            st.success(f"Successfully loaded: {image.size[0]}x{image.size[1]}px")
+            return image
+            
+        except requests.exceptions.Timeout:
+            st.warning(f"Timeout downloading: {url[:50]}...")
+            if attempt < max_retries - 1:
+                continue
+        except requests.exceptions.ConnectionError:
+            st.warning(f"Connection error: {url[:50]}...")
+            if attempt < max_retries - 1:
+                continue
+        except requests.exceptions.RequestException as e:
+            st.error(f"Request failed: {str(e)}")
+            if attempt < max_retries - 1:
+                continue
+        except Exception as e:
+            st.error(f"Unexpected error: {str(e)}")
+            return None
+    
+    # All retries failed
+    st.error(f"Failed after {max_retries} attempts: {url[:50]}...")
+    return None
 
 def extract_urls_from_text(text):
     """Extract URLs from text"""
