@@ -4,27 +4,27 @@ from PIL import Image
 import io
 from datetime import datetime
 import re
-import requests
 import fitz  # PyMuPDF
 import plotly.graph_objects as go
+import plotly.express as px
 import networkx as nx
 from collections import defaultdict
 import json
+import pandas as pd
+import numpy as np
 
 # Page config
 st.set_page_config(
-    page_title="SolidAdditive AI",
-    page_icon="🔧",
+    page_title="SolidAdditive AI - An Agentic model for solid-state additive manufacturing processes",
+    page_icon=" ",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Enhanced CSS with better styling
+# Enhanced CSS
 st.markdown("""
     <style>
-    .main {
-        background: linear-gradient(135deg, #1e3a8a 0%, #1e40af 50%, #1e3a8a 100%);
-    }
+    .main {background: linear-gradient(135deg, #1e3a8a 0%, #1e40af 50%, #1e3a8a 100%);}
     .chat-message {
         padding: 1.5rem;
         border-radius: 0.8rem;
@@ -55,19 +55,25 @@ st.markdown("""
         margin: 1rem 0;
         border-radius: 0.5rem;
     }
-    .reference-item {
-        padding: 0.5rem;
-        margin: 0.5rem 0;
-        background: white;
-        border-radius: 0.4rem;
-        border: 1px solid #e5e7eb;
-    }
     .knowledge-graph-container {
         background: white;
         padding: 1.5rem;
         border-radius: 0.8rem;
         margin: 1rem 0;
         box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    }
+    .parameter-card {
+        background: white;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin: 0.5rem 0;
+        border-left: 3px solid #3b82f6;
+    }
+    .comparison-table {
+        background: white;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin: 1rem 0;
     }
     h1, h2, h3 {
         color: white !important;
@@ -93,16 +99,6 @@ st.markdown("""
         text-align: center;
         box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
     }
-    .stat-badge {
-        display: inline-block;
-        padding: 0.3rem 0.8rem;
-        background: #dbeafe;
-        color: #1e40af;
-        border-radius: 1rem;
-        font-size: 0.85rem;
-        font-weight: 600;
-        margin: 0.2rem;
-    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -115,12 +111,96 @@ if 'model' not in st.session_state:
     st.session_state.model = None
 if 'knowledge_graph' not in st.session_state:
     st.session_state.knowledge_graph = defaultdict(list)
-if 'references' not in st.session_state:
-    st.session_state.references = []
-if 'last_download_time' not in st.session_state:
-    st.session_state.last_download_time = 0
-if 'download_count' not in st.session_state:
-    st.session_state.download_count = 0
+if 'process_comparisons' not in st.session_state:
+    st.session_state.process_comparisons = []
+if 'material_database' not in st.session_state:
+    st.session_state.material_database = {}
+if 'conversation_context' not in st.session_state:
+    st.session_state.conversation_context = []
+
+# Solid-State AM Process Database
+SSAM_PROCESSES = {
+    "CSAM": {
+        "name": "Cold Spray Additive Manufacturing",
+        "temperature_range": "< 0.5 Tm",
+        "bonding_mechanism": "Kinetic energy, plastic deformation",
+        "typical_materials": ["Al", "Cu", "Ti", "Stainless Steel", "Composites"],
+        "advantages": ["No melting", "Low oxidation", "High deposition rate", "Thick coatings"],
+        "limitations": ["Limited geometry", "Porosity control", "Equipment cost"],
+        "typical_velocity": "300-1200 m/s",
+        "typical_pressure": "1-5 MPa",
+        "applications": ["Repair", "Coatings", "Structural components"]
+    },
+    "UAM": {
+        "name": "Ultrasonic Additive Manufacturing",
+        "temperature_range": "< 0.5 Tm",
+        "bonding_mechanism": "Ultrasonic vibration, solid-state welding",
+        "typical_materials": ["Al", "Cu", "Stainless Steel", "Ti", "Composites"],
+        "advantages": ["Precision", "Embedded sensors", "Low temperature", "Dissimilar metals"],
+        "limitations": ["Slow deposition", "Layer delamination", "Surface finish"],
+        "typical_frequency": "20 kHz",
+        "typical_force": "1000-4000 N",
+        "applications": ["Aerospace", "Electronics", "Embedded systems"]
+    },
+    "FSAM": {
+        "name": "Friction Stir Additive Manufacturing",
+        "temperature_range": "0.6-0.9 Tm",
+        "bonding_mechanism": "Friction heat, plastic deformation",
+        "typical_materials": ["Al alloys", "Mg alloys", "Steel", "Ti"],
+        "advantages": ["Dense parts", "Good mechanical properties", "Large components"],
+        "limitations": ["Tool wear", "Complex geometries limited", "Force requirements"],
+        "typical_rotation": "200-2000 RPM",
+        "typical_traverse": "50-500 mm/min",
+        "applications": ["Structural parts", "Large components", "Repair"]
+    },
+    "AFSD": {
+        "name": "Additive Friction Stir Deposition",
+        "temperature_range": "0.7-0.95 Tm",
+        "bonding_mechanism": "Friction heat, severe plastic deformation",
+        "typical_materials": ["Al", "Mg", "Ti", "Steel", "Inconel"],
+        "advantages": ["High density", "Excellent properties", "Large parts", "High deposition"],
+        "limitations": ["Equipment requirements", "Process control", "Tool design"],
+        "typical_rotation": "300-600 RPM",
+        "typical_feed_rate": "100-300 mm/min",
+        "applications": ["Aerospace", "Defense", "Large structures"]
+    }
+}
+
+# Material properties database
+MATERIAL_DATABASE = {
+    "Aluminum 6061": {
+        "density": "2.70 g/cm³",
+        "melting_point": "582-652°C",
+        "thermal_conductivity": "167 W/m·K",
+        "yield_strength": "276 MPa",
+        "ssam_compatibility": ["CSAM", "UAM", "FSAM", "AFSD"],
+        "common_applications": "Aerospace, automotive, structural"
+    },
+    "Copper": {
+        "density": "8.96 g/cm³",
+        "melting_point": "1085°C",
+        "thermal_conductivity": "401 W/m·K",
+        "yield_strength": "70 MPa",
+        "ssam_compatibility": ["CSAM", "UAM"],
+        "common_applications": "Electronics, heat exchangers, conductors"
+    },
+    "Titanium Ti-6Al-4V": {
+        "density": "4.43 g/cm³",
+        "melting_point": "1604-1660°C",
+        "thermal_conductivity": "6.7 W/m·K",
+        "yield_strength": "880 MPa",
+        "ssam_compatibility": ["CSAM", "UAM", "FSAM", "AFSD"],
+        "common_applications": "Aerospace, biomedical, high-performance"
+    },
+    "Stainless Steel 316L": {
+        "density": "8.00 g/cm³",
+        "melting_point": "1375-1400°C",
+        "thermal_conductivity": "16 W/m·K",
+        "yield_strength": "170 MPa",
+        "ssam_compatibility": ["CSAM", "UAM", "FSAM"],
+        "common_applications": "Corrosion resistance, marine, chemical"
+    }
+}
 
 def configure_gemini(api_key):
     """Configure Gemini API"""
@@ -134,56 +214,49 @@ def configure_gemini(api_key):
 
 def extract_entities_and_relations(text):
     """Extract key entities and their relationships from text"""
-    # Enhanced prompt for entity extraction
-    extraction_prompt = f"""Analyze this text and extract key concepts and their relationships.
-    
-Text: {text[:1000]}
+    extraction_prompt = f"""Analyze this text about solid-state additive manufacturing and extract:
 
-Return a JSON with:
-1. "entities": list of main concepts/terms (max 10)
-2. "relationships": list of {{source, relation, target}} dictionaries
+Text: {text[:1500]}
 
-Focus on technical terms, processes, materials, and their connections.
+Return JSON with:
+1. "entities": list of main technical concepts (max 12)
+2. "relationships": list of {{"source", "relation", "target"}} dictionaries
+
+Focus on: processes, materials, parameters, properties, defects, applications.
 Format: {{"entities": ["term1", "term2"], "relationships": [{{"source": "term1", "relation": "uses", "target": "term2"}}]}}"""
     
     try:
         if st.session_state.model:
             response = st.session_state.model.generate_content(extraction_prompt)
-            # Extract JSON from response
             json_match = re.search(r'\{.*\}', response.text, re.DOTALL)
             if json_match:
                 data = json.loads(json_match.group())
                 return data.get('entities', []), data.get('relationships', [])
     except Exception as e:
-        st.warning(f"Entity extraction failed: {str(e)}")
+        pass
     
-    # Fallback: simple keyword extraction
+    # Fallback: extract technical keywords
     keywords = re.findall(r'\b[A-Z][A-Za-z]{3,}\b', text)
-    unique_keywords = list(set(keywords))[:10]
+    unique_keywords = list(set(keywords))[:12]
     return unique_keywords, []
 
 def create_knowledge_graph(entities, relationships):
-    """Create an interactive knowledge graph using Plotly"""
+    """Create interactive knowledge graph"""
     G = nx.Graph()
     
-    # Add nodes
     for entity in entities:
         G.add_node(entity)
     
-    # Add edges
     for rel in relationships:
         if 'source' in rel and 'target' in rel:
             G.add_edge(rel['source'], rel['target'], label=rel.get('relation', ''))
     
-    # If no relationships, create a simple connected graph
     if not relationships and len(entities) > 1:
         for i in range(len(entities) - 1):
             G.add_edge(entities[i], entities[i + 1])
     
-    # Generate layout
     pos = nx.spring_layout(G, k=2, iterations=50)
     
-    # Create edge traces
     edge_trace = []
     for edge in G.edges():
         x0, y0 = pos[edge[0]]
@@ -199,11 +272,7 @@ def create_knowledge_graph(entities, relationships):
             )
         )
     
-    # Create node trace
-    node_x = []
-    node_y = []
-    node_text = []
-    node_size = []
+    node_x, node_y, node_text, node_size = [], [], [], []
     
     for node in G.nodes():
         x, y = pos[node]
@@ -213,8 +282,7 @@ def create_knowledge_graph(entities, relationships):
         node_size.append(20 + G.degree(node) * 10)
     
     node_trace = go.Scatter(
-        x=node_x,
-        y=node_y,
+        x=node_x, y=node_y,
         mode='markers+text',
         text=node_text,
         textposition="top center",
@@ -229,16 +297,11 @@ def create_knowledge_graph(entities, relationships):
         showlegend=False
     )
     
-    # Create figure
     fig = go.Figure(data=edge_trace + [node_trace])
     
     fig.update_layout(
-        title={
-            'text': "Knowledge Graph",
-            'x': 0.5,
-            'xanchor': 'center',
-            'font': {'size': 20, 'color': '#1e293b', 'family': 'Arial Black'}
-        },
+        title={'text': "Knowledge Graph", 'x': 0.5, 'xanchor': 'center',
+               'font': {'size': 20, 'color': '#1e293b', 'family': 'Arial Black'}},
         showlegend=False,
         hovermode='closest',
         margin=dict(b=20, l=5, r=5, t=40),
@@ -251,266 +314,96 @@ def create_knowledge_graph(entities, relationships):
     
     return fig
 
-def search_google_images_simple(query, num_results=3):
-    """Search for images using multiple methods with improved error handling"""
-    image_urls = []
+def create_process_comparison_chart(processes):
+    """Create comparison chart for SSAM processes"""
+    if not processes or len(processes) < 2:
+        return None
     
-    # Method 1: Check known URLs database first (most reliable)
-    known_urls_map = {
-        'cold spray': [
-            'https://i.imgur.com/YQExZ8L.png',  # Reliable hosting
-            'https://www.azom.com/images/Article_Images/ImageForArticle_11907_15869419534470818.jpg'
-        ],
-        'csam': [
-            'https://i.imgur.com/YQExZ8L.png'
-        ],
-        'microstructure': [
-            'https://i.imgur.com/placeholder1.jpg'  # Replace with actual working URLs
-        ],
-        'uam': [
-            'https://i.imgur.com/placeholder2.jpg'
-        ]
+    categories = ['Temperature', 'Deposition Rate', 'Precision', 'Material Range', 'Cost']
+    
+    # Normalized scores for comparison (0-10 scale)
+    scores = {
+        'CSAM': [2, 9, 6, 8, 7],
+        'UAM': [2, 3, 9, 7, 6],
+        'FSAM': [7, 6, 7, 7, 8],
+        'AFSD': [8, 8, 7, 8, 9]
     }
     
-    query_lower = query.lower()
-    for keyword, urls in known_urls_map.items():
-        if keyword in query_lower:
-            st.info(f"Using curated image sources for '{keyword}'")
-            # Verify URLs work before returning
-            working_urls = []
-            for url in urls:
-                if verify_url_accessible(url):
-                    working_urls.append(url)
-            if working_urls:
-                return working_urls
+    fig = go.Figure()
     
-    # Method 2: Try DuckDuckGo with better error handling
-    try:
-        from duckduckgo_search import DDGS
-        st.info("Searching DuckDuckGo...")
-        with DDGS(timeout=10) as ddgs:
-            results = list(ddgs.images(query, max_results=num_results * 2))  # Get more to filter
-            # Filter for reliable domains
-            reliable_domains = ['wikipedia.org', 'wikimedia.org', 'imgur.com', 'azom.com']
-            for r in results:
-                if 'image' in r:
-                    url = r['image']
-                    # Prefer reliable domains
-                    if any(domain in url for domain in reliable_domains):
-                        image_urls.append(url)
-                        if len(image_urls) >= num_results:
-                            break
-            
-            # If no reliable domains found, use any results
-            if not image_urls and results:
-                image_urls = [r['image'] for r in results[:num_results] if 'image' in r]
-            
-            if image_urls:
-                st.success(f"Found {len(image_urls)} images")
-                return image_urls
-    except Exception as e:
-        st.warning(f"DuckDuckGo unavailable (rate limited or blocked)")
+    for process in processes:
+        if process in scores:
+            fig.add_trace(go.Scatterpolar(
+                r=scores[process],
+                theta=categories,
+                fill='toself',
+                name=process
+            ))
     
-    # Method 3: Try Bing scraping (less likely to work)
-    try:
-        st.info("Trying alternative search...")
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'DNT': '1',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1'
+    fig.update_layout(
+        polar=dict(
+            radialaxis=dict(visible=True, range=[0, 10])
+        ),
+        showlegend=True,
+        title="Process Comparison",
+        height=500
+    )
+    
+    return fig
+
+def create_parameter_table(process_name):
+    """Create parameter recommendations table"""
+    if process_name not in SSAM_PROCESSES:
+        return None
+    
+    process = SSAM_PROCESSES[process_name]
+    
+    # Create DataFrame
+    data = {
+        'Parameter': [],
+        'Range': [],
+        'Notes': []
+    }
+    
+    if process_name == 'CSAM':
+        data = {
+            'Parameter': ['Particle Velocity', 'Gas Pressure', 'Gas Temperature', 'Standoff Distance', 'Traverse Speed'],
+            'Range': ['300-1200 m/s', '1-5 MPa', '200-1000°C', '10-50 mm', '10-500 mm/s'],
+            'Notes': ['Critical for bonding', 'Affects velocity', 'Affects particle temp', 'Affects deposition', 'Affects build quality']
         }
-        search_url = f"https://www.bing.com/images/search?q={requests.utils.quote(query)}&FORM=HDRSC2"
-        response = requests.get(search_url, headers=headers, timeout=10)
+    elif process_name == 'UAM':
+        data = {
+            'Parameter': ['Frequency', 'Amplitude', 'Normal Force', 'Weld Speed', 'Layer Thickness'],
+            'Range': ['20 kHz', '10-50 µm', '1000-4000 N', '20-100 mm/s', '100-200 µm'],
+            'Notes': ['Fixed by system', 'Key parameter', 'Critical for bonding', 'Affects quality', 'Per layer']
+        }
+    elif process_name in ['FSAM', 'AFSD']:
+        data = {
+            'Parameter': ['Rotation Speed', 'Traverse Speed', 'Axial Force', 'Feed Rate', 'Tool Design'],
+            'Range': ['200-2000 RPM', '50-500 mm/min', '5-50 kN', '100-300 mm/min', 'Process specific'],
+            'Notes': ['Affects heat', 'Affects microstructure', 'Critical parameter', 'Deposition rate', 'Affects flow']
+        }
+    
+    df = pd.DataFrame(data)
+    return df
+
+def extract_pdf_text(pdf_file):
+    """Extract text from PDF"""
+    try:
+        pdf_file.seek(0)
+        pdf_bytes = pdf_file.read()
+        pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
         
-        if response.status_code == 200:
-            urls = re.findall(r'"murl":"([^"]+)"', response.text)
-            if urls:
-                # Filter out likely broken URLs
-                filtered_urls = [url for url in urls if not any(blocked in url for blocked in ['researchgate.net', 'facebook.com', 'instagram.com'])]
-                image_urls = filtered_urls[:num_results]
-                if image_urls:
-                    st.success(f"Found {len(image_urls)} images")
-                    return image_urls
+        text = ""
+        for page_num in range(min(len(pdf_document), 20)):
+            page = pdf_document[page_num]
+            text += page.get_text()
+        
+        pdf_document.close()
+        return text
     except Exception as e:
-        pass  # Silently fail, will show final message
-    
-    # If all methods fail, provide helpful guidance
-    st.info("Image search unavailable. Please use one of these options:")
-    st.markdown("""
-    **Option 1: Upload an image file**
-    - Click 'Upload Files' section below
-    - Select image from your computer
-    
-    **Option 2: Paste a direct image URL**
-    - Find an image online
-    - Copy the image URL
-    - Paste it in your message
-    
-    **Option 3: Try a more specific query**
-    - Be more descriptive
-    - Include technical terms
-    """)
-    
-    return []
-
-def verify_url_accessible(url, timeout=5):
-    """Quick check if URL is accessible"""
-    try:
-        response = requests.head(url, timeout=timeout, allow_redirects=True)
-        return response.status_code == 200
-    except:
-        return False
-
-def apply_rate_limit(min_delay=1.0):
-    """Apply rate limiting between downloads to avoid getting blocked"""
-    import time
-    current_time = time.time()
-    time_since_last = current_time - st.session_state.last_download_time
-    
-    if time_since_last < min_delay:
-        wait_time = min_delay - time_since_last
-        time.sleep(wait_time)
-    
-    st.session_state.last_download_time = time.time()
-    st.session_state.download_count += 1
-
-def download_image(url, max_retries=2):
-    """Download and process image from URL with improved error handling"""
-    
-    # Apply rate limiting to avoid getting blocked
-    apply_rate_limit(min_delay=1.5)
-    
-    # Skip known problematic domains
-    blocked_domains = ['researchgate.net', 'facebook.com', 'instagram.com', 'pinterest.com']
-    if any(domain in url.lower() for domain in blocked_domains):
-        st.warning(f"Skipping URL from blocked domain: {url[:50]}...")
-        return None
-    
-    for attempt in range(max_retries):
-        try:
-            if attempt > 0:
-                st.info(f"Retry attempt {attempt + 1} for: {url[:50]}...")
-            else:
-                st.info(f"Downloading: {url[:80]}...")
-            
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'DNT': '1',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1',
-                'Sec-Fetch-Dest': 'image',
-                'Sec-Fetch-Mode': 'no-cors',
-                'Sec-Fetch-Site': 'cross-site',
-                'Cache-Control': 'max-age=0'
-            }
-            
-            # Add referer for specific domains
-            if 'wikimedia' in url or 'wikipedia' in url:
-                headers['Referer'] = 'https://en.wikipedia.org/'
-            elif 'imgur' in url:
-                headers['Referer'] = 'https://imgur.com/'
-            
-            response = requests.get(
-                url, 
-                headers=headers, 
-                timeout=15, 
-                allow_redirects=True,
-                verify=True
-            )
-            
-            # Check response
-            if response.status_code == 404:
-                st.error(f"Image not found (404): {url[:60]}...")
-                return None
-            elif response.status_code == 403:
-                st.error(f"Access forbidden (403): {url[:60]}...")
-                return None
-            elif response.status_code != 200:
-                st.error(f"HTTP {response.status_code}: {url[:60]}...")
-                return None
-            
-            response.raise_for_status()
-            
-            # Check if we actually got an image
-            content_type = response.headers.get('Content-Type', '')
-            if not any(img_type in content_type for img_type in ['image/', 'application/octet-stream']):
-                st.warning(f"Not an image (got {content_type}): {url[:50]}...")
-                return None
-            
-            # Try to open as image
-            try:
-                image = Image.open(io.BytesIO(response.content))
-            except Exception as img_error:
-                st.error(f"Invalid image data: {str(img_error)}")
-                return None
-            
-            # Convert mode if needed
-            if image.mode not in ('RGB', 'RGBA', 'L'):
-                image = image.convert('RGB')
-            
-            # Resize if too large
-            max_size = 1200
-            if max(image.size) > max_size:
-                ratio = max_size / max(image.size)
-                new_size = tuple(int(dim * ratio) for dim in image.size)
-                image = image.resize(new_size, Image.Resampling.LANCZOS)
-            
-            st.success(f"Successfully loaded: {image.size[0]}x{image.size[1]}px")
-            return image
-            
-        except requests.exceptions.Timeout:
-            st.warning(f"Timeout downloading: {url[:50]}...")
-            if attempt < max_retries - 1:
-                continue
-        except requests.exceptions.ConnectionError:
-            st.warning(f"Connection error: {url[:50]}...")
-            if attempt < max_retries - 1:
-                continue
-        except requests.exceptions.RequestException as e:
-            st.error(f"Request failed: {str(e)}")
-            if attempt < max_retries - 1:
-                continue
-        except Exception as e:
-            st.error(f"Unexpected error: {str(e)}")
-            return None
-    
-    # All retries failed
-    st.error(f"Failed after {max_retries} attempts: {url[:50]}...")
-    return None
-
-def extract_urls_from_text(text):
-    """Extract URLs from text"""
-    pattern = r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
-    return re.findall(pattern, text)
-
-def should_search_images(prompt):
-    """Determine if image search is needed"""
-    keywords = ['show', 'display', 'find', 'get', 'image', 'diagram', 'picture', 'photo', 'schematic', 'visualize']
-    return any(k in prompt.lower() for k in keywords)
-
-def extract_search_query(prompt):
-    """Extract clean search query from prompt"""
-    remove = ['show', 'display', 'find', 'get', 'me', 'an', 'a', 'the', 'image', 'of', 'picture', 'diagram', 'can', 'you', 'please']
-    words = prompt.lower().split()
-    search_words = [w for w in words if w not in remove and len(w) > 2]
-    return ' '.join(search_words)
-
-def process_image_file(uploaded_file):
-    """Process uploaded image file"""
-    try:
-        image = Image.open(uploaded_file)
-        if image.mode not in ('RGB', 'RGBA'):
-            image = image.convert('RGB')
-        return image
-    except Exception as e:
-        st.error(f"Image processing error: {str(e)}")
-        return None
+        st.error(f"PDF text extraction error: {str(e)}")
+        return ""
 
 def extract_pdf_images(pdf_file):
     """Extract images from PDF pages"""
@@ -531,70 +424,83 @@ def extract_pdf_images(pdf_file):
         pdf_document.close()
         return images
     except Exception as e:
-        st.error(f"PDF extraction error: {str(e)}")
+        st.error(f"PDF image extraction error: {str(e)}")
         return []
 
-def extract_references_from_response(response_text, image_sources):
-    """Extract and format references from the AI response"""
-    references = []
-    
-    # Add image sources as references
-    for idx, (img, source) in enumerate(image_sources):
-        if 'URL:' in source:
-            url = source.replace('URL:', '').strip()
-            references.append({
-                'type': 'Image Source',
-                'title': f'Image {idx + 1}',
-                'url': url,
-                'description': 'Visual reference used in analysis'
-            })
-        elif 'Search:' in source:
-            url = source.replace('Search:', '').strip()
-            references.append({
-                'type': 'Search Result',
-                'title': f'Image {idx + 1}',
-                'url': url,
-                'description': 'Retrieved via image search'
-            })
-    
-    # Extract potential citations from response (URLs, papers, etc.)
-    urls_in_response = extract_urls_from_text(response_text)
-    for url in urls_in_response:
-        references.append({
-            'type': 'Cited Source',
-            'title': 'Referenced in response',
-            'url': url,
-            'description': 'Source mentioned by AI'
-        })
-    
-    # Add knowledge base reference
-    references.append({
-        'type': 'AI Knowledge',
-        'title': 'Gemini 2.0 Flash',
-        'url': 'https://deepmind.google/technologies/gemini/',
-        'description': 'AI model trained on solid-state additive manufacturing knowledge'
-    })
-    
-    return references
+def process_image_file(uploaded_file):
+    """Process uploaded image file"""
+    try:
+        image = Image.open(uploaded_file)
+        if image.mode not in ('RGB', 'RGBA'):
+            image = image.convert('RGB')
+        return image
+    except Exception as e:
+        st.error(f"Image processing error: {str(e)}")
+        return None
 
-def get_gemini_response(prompt, images=None, pdf_files=None):
-    """Get AI response with enhanced analysis"""
+def validate_ssam_query(query):
+    """Validate that query is related to solid-state additive manufacturing"""
+    
+    # SSAM-related keywords
+    ssam_keywords = [
+        'csam', 'cold spray', 'uam', 'ultrasonic', 'fsam', 'friction stir',
+        'afsd', 'additive friction', 'solid state', 'solid-state',
+        'kinetic spray', 'supersonic', 'cold gas', 'friction', 'ultrasonic welding',
+        'microstructure', 'bonding', 'deposition', 'particle', 'substrate',
+        'aluminum', 'copper', 'titanium', 'metal', 'alloy', 'coating'
+    ]
+    
+    # Non-SSAM manufacturing processes to reject
+    excluded_keywords = [
+        'fdm', 'fused deposition', 'sla', 'stereolithography', 'sls', 'selective laser',
+        'dmls', 'direct metal laser', 'ebm', 'electron beam', 'binder jetting',
+        'material jetting', 'polyjet', '3d printing', 'powder bed',
+        'laser melting', 'laser sintering', 'arc welding', 'mig', 'tig',
+        'casting', 'forging', 'machining', 'cnc', 'injection molding',
+        'extrusion', 'thermoforming', 'stamping', 'rolling'
+    ]
+    
+    query_lower = query.lower()
+    
+    # Check for excluded processes first
+    for excluded in excluded_keywords:
+        if excluded in query_lower:
+            return False, f"This app is exclusively for Solid-State Additive Manufacturing (CSAM, UAM, FSAM, AFSD). Questions about '{excluded}' and other non-solid-state processes are outside the scope."
+    
+    # Check for SSAM-related content
+    has_ssam_content = any(keyword in query_lower for keyword in ssam_keywords)
+    
+    # If query is very short (< 3 words), be lenient
+    if len(query.split()) < 3:
+        has_ssam_content = True
+    
+    if not has_ssam_content:
+        return False, "This app specializes exclusively in Solid-State Additive Manufacturing (CSAM, UAM, FSAM, AFSD). Please ask questions specifically about these solid-state processes, their materials, parameters, or applications."
+    
+    return True, ""
+
+def get_gemini_response(prompt, images=None, pdf_files=None, mode="general"):
+    """Get AI response with specialized prompts - SSAM ONLY"""
     try:
         if not st.session_state.model:
-            return " Please configure API key first", None, []
+            return "Please configure API key first", None, [], [], []
+        
+        # VALIDATE: Ensure query is about solid-state AM only
+        is_valid, error_msg = validate_ssam_query(prompt)
+        if not is_valid:
+            return error_msg, None, [], [], []
         
         all_images = []
-        
-        # Process URLs in prompt
-        urls = extract_urls_from_text(prompt)
-        for url in urls:
-            img = download_image(url)
-            if img:
-                all_images.append((img, f"URL: {url[:50]}..."))
+        extracted_text = ""
         
         # Process PDFs
         if pdf_files:
             for pdf_file in pdf_files:
+                pdf_file.seek(0)
+                text = extract_pdf_text(pdf_file)
+                if text:
+                    extracted_text += f"\n\nPDF Content:\n{text[:3000]}"
+                
                 pdf_file.seek(0)
                 pdf_imgs = extract_pdf_images(pdf_file)
                 for idx, img in enumerate(pdf_imgs):
@@ -605,35 +511,111 @@ def get_gemini_response(prompt, images=None, pdf_files=None):
             for idx, img in enumerate(images):
                 all_images.append((img, f"Uploaded Image {idx + 1}"))
         
-        # Auto-search for images if requested
-        if should_search_images(prompt) and not all_images:
-            search_query = extract_search_query(prompt)
-            if search_query:
-                st.info(f" Searching for: **{search_query}**")
-                image_urls = search_google_images_simple(f"{search_query} solid state additive manufacturing", num_results=3)
-                
-                if image_urls:
-                    for url in image_urls:
-                        img = download_image(url)
-                        if img:
-                            all_images.append((img, f"Search: {url[:50]}..."))
+        # Build specialized prompt based on mode
+        if mode == "microstructure":
+            system_prompt = """You are an expert metallurgist specializing EXCLUSIVELY in solid-state additive manufacturing (CSAM, UAM, FSAM, AFSD) microstructure analysis.
+
+CRITICAL: You ONLY discuss solid-state additive manufacturing processes. If asked about fusion-based AM, powder bed fusion, FDM, SLA, or any non-solid-state processes, politely decline and redirect to SSAM topics.
+
+Analyze the provided images/content focusing on:
+1. Grain structure and morphology in SSAM processes
+2. Phase composition in solid-state deposited materials
+3. SSAM-specific defects (porosity, cracks, unbonded regions, particle boundaries)
+4. Interface characteristics in cold spray, UAM, friction stir processes
+5. Particle deformation (for CSAM/cold spray)
+6. Bonding quality indicators specific to solid-state bonding
+
+Provide detailed technical analysis with specific observations related to CSAM, UAM, FSAM, or AFSD."""
+
+        elif mode == "process_design":
+            system_prompt = """You are a manufacturing process engineer specializing EXCLUSIVELY in solid-state additive manufacturing (CSAM, UAM, FSAM, AFSD).
+
+CRITICAL: You ONLY provide guidance on solid-state AM processes. Do not discuss or recommend fusion-based AM, conventional welding, casting, or any non-solid-state manufacturing. If asked, politely redirect to SSAM alternatives.
+
+Analyze the query and provide:
+1. Process parameter recommendations for CSAM, UAM, FSAM, or AFSD
+2. Material-process compatibility in solid-state processes
+3. Expected outcomes and properties from solid-state bonding
+4. SSAM-specific challenges and solutions
+5. Best practices for solid-state AM
+6. Quality control considerations for solid-state deposited materials
+
+Be specific with numerical ranges and practical guidance for solid-state processes only."""
+
+        elif mode == "troubleshooting":
+            system_prompt = """You are a solid-state additive manufacturing (CSAM, UAM, FSAM, AFSD) troubleshooting expert EXCLUSIVELY.
+
+CRITICAL: You ONLY troubleshoot solid-state AM issues. Do not provide solutions for fusion-based AM, conventional manufacturing, or other processes. If asked about non-SSAM processes, explain this is outside your expertise and redirect to SSAM topics.
+
+Analyze the problem and provide:
+1. Root cause analysis for SSAM-specific issues
+2. Diagnostic steps for solid-state processes
+3. Corrective actions applicable to CSAM, UAM, FSAM, or AFSD
+4. Preventive measures for solid-state AM
+5. Process parameter adjustments for solid-state bonding
+6. Quality inspection methods for solid-state deposited parts
+
+Focus on practical, actionable solutions for solid-state AM only."""
+
+        elif mode == "comparison":
+            system_prompt = """You are an expert in solid-state additive manufacturing processes (CSAM, UAM, FSAM, AFSD) EXCLUSIVELY.
+
+CRITICAL: You ONLY compare solid-state AM processes with each other or discuss solid-state vs fusion-based trade-offs. Do not provide detailed guidance on fusion-based processes. Always frame comparisons from a solid-state perspective.
+
+Compare the requested processes/materials providing:
+1. Key differences and similarities between SSAM processes
+2. Advantages and disadvantages within solid-state AM context
+3. Application suitability for CSAM, UAM, FSAM, AFSD
+4. Cost considerations specific to solid-state processes
+5. Performance characteristics of solid-state bonding
+6. Selection criteria among SSAM processes
+
+Use tables or structured comparisons. If comparing SSAM to non-SSAM, focus on why SSAM is preferred."""
+
+        else:  # general mode
+            system_prompt = """You are an expert in solid-state additive manufacturing (CSAM, UAM, FSAM, AFSD) EXCLUSIVELY.
+
+CRITICAL SCOPE LIMITATION: 
+- You ONLY discuss solid-state additive manufacturing: Cold Spray (CSAM), Ultrasonic AM (UAM), Friction Stir AM (FSAM), and Additive Friction Stir Deposition (AFSD)
+- You do NOT discuss: FDM, SLA, SLS, DMLS, EBM, powder bed fusion, laser melting, binder jetting, or any fusion-based or polymer AM processes
+- If asked about non-SSAM topics, politely explain: "This system specializes exclusively in solid-state additive manufacturing. For questions about [other process], please consult resources specific to that technology."
+
+Provide comprehensive, technical analysis covering:
+1. Detailed explanations of SSAM concepts and mechanisms
+2. Technical parameters specific to solid-state processes
+3. Material behavior in solid-state bonding
+4. Solid-state process mechanics (kinetic energy, ultrasonic, friction)
+5. Applications and best practices for CSAM, UAM, FSAM, AFSD
+6. Current research in solid-state additive manufacturing
+
+Be thorough and technically accurate about solid-state AM only."""
+
+        # Add context from conversation history
+        context = ""
+        if st.session_state.conversation_context:
+            recent_context = st.session_state.conversation_context[-3:]
+            context = "\n\nRecent conversation context:\n" + "\n".join(recent_context)
         
-        # Enhanced prompt
-        prompt_text = f"""You are an expert in solid-state additive manufacturing (CSAM, UAM, FSAM, AFSD).
+        prompt_text = f"""{system_prompt}
 
-User Question: {prompt}
+User Query: {prompt}
 
-Instructions:
-1. Provide detailed, technical analysis
-2. If images are provided, describe specific features, regions, and components visible
-3. Structure your response with clear sections
-4. Include technical terminology and explain concepts
-5. When applicable, mention key processes, materials, and parameters
+{extracted_text}
 
-Be comprehensive but concise."""
+{context}
+
+MANDATORY INSTRUCTIONS:
+- This system is EXCLUSIVELY for solid-state additive manufacturing (CSAM, UAM, FSAM, AFSD)
+- If images are provided, analyze them ONLY in the context of solid-state processes
+- Include technical terminology specific to solid-state bonding mechanisms
+- Provide quantitative information relevant to SSAM processes
+- Reference ONLY CSAM, UAM, FSAM, or AFSD processes
+- If the query mentions non-solid-state processes, politely explain that this is outside the scope
+- DO NOT provide guidance on fusion-based AM, FDM, SLA, SLS, DMLS, EBM, or other non-solid-state processes
+- Structure your response clearly with SSAM focus"""
 
         if all_images:
-            prompt_text += f"\n\n Analyzing {len(all_images)} image(s). Provide detailed visual analysis."
+            prompt_text += f"\n\nAnalyzing {len(all_images)} image(s). Provide detailed visual analysis."
         
         # Build content
         content_parts = [prompt_text]
@@ -641,12 +623,9 @@ Be comprehensive but concise."""
             content_parts.append(img)
         
         # Generate response
-        with st.spinner(" Generating response..."):
+        with st.spinner("Generating expert analysis..."):
             response = st.session_state.model.generate_content(content_parts)
             response_text = response.text
-        
-        # Extract references
-        references = extract_references_from_response(response_text, all_images)
         
         # Extract entities for knowledge graph
         entities, relationships = extract_entities_and_relations(response_text)
@@ -661,11 +640,32 @@ Be comprehensive but concise."""
                     (rel.get('relation', 'relates_to'), rel['target'])
                 )
         
+        # Update conversation context
+        st.session_state.conversation_context.append(f"Q: {prompt[:200]}")
+        st.session_state.conversation_context.append(f"A: {response_text[:200]}")
+        if len(st.session_state.conversation_context) > 10:
+            st.session_state.conversation_context = st.session_state.conversation_context[-10:]
+        
+        # Create references (now from uploaded content only)
+        references = []
+        for idx, (img, source) in enumerate(all_images):
+            references.append({
+                'type': 'Uploaded Content',
+                'title': source,
+                'description': 'User-provided material for analysis'
+            })
+        
+        references.append({
+            'type': 'AI Knowledge Base',
+            'title': 'Gemini 2.0 Flash',
+            'description': 'Expert knowledge in solid-state additive manufacturing'
+        })
+        
         return response_text, all_images, references, entities, relationships
     
     except Exception as e:
         import traceback
-        error_msg = f" Error: {str(e)}\n{traceback.format_exc()}"
+        error_msg = f"Error: {str(e)}\n{traceback.format_exc()}"
         st.error(error_msg)
         return error_msg, None, [], [], []
 
@@ -675,19 +675,17 @@ def display_references(references):
         return
     
     st.markdown('<div class="reference-box">', unsafe_allow_html=True)
-    st.markdown("###  References & Sources")
+    st.markdown("### References & Sources")
     
     for idx, ref in enumerate(references, 1):
         ref_type = ref.get('type', 'Source')
         title = ref.get('title', 'Reference')
-        url = ref.get('url', '#')
         desc = ref.get('description', '')
         
         st.markdown(f"""
-        <div class="reference-item">
+        <div style="padding: 0.5rem; margin: 0.5rem 0; background: white; border-radius: 0.4rem; border: 1px solid #e5e7eb;">
             <strong>[{idx}] {ref_type}:</strong> {title}<br>
-            <small>{desc}</small><br>
-            <a href="{url}" target="_blank" style="color: #2563eb;">🔗 {url[:80]}...</a>
+            <small>{desc}</small>
         </div>
         """, unsafe_allow_html=True)
     
@@ -696,42 +694,37 @@ def display_references(references):
 def display_message(message, is_user=False):
     """Display chat message with enhanced formatting"""
     css_class = "user-message" if is_user else "assistant-message"
-    role = " You" if is_user else " AI Assistant"
+    role = "You" if is_user else "AI Expert"
     
     with st.container():
         st.markdown(f'<div class="chat-message {css_class}">', unsafe_allow_html=True)
         st.markdown(f"**{role}** • {message['timestamp']}")
         
-        # Display user files
         if is_user and message.get('files'):
-            st.markdown("** Attached Files:**")
+            st.markdown("**Attached Files:**")
             cols = st.columns(min(len(message['files']), 4))
             for idx, f in enumerate(message['files']):
                 with cols[idx % 4]:
                     if f.get('data'):
                         st.image(f['data'], caption=f['name'], use_column_width=True)
                     else:
-                        st.markdown(f" {f['name']}")
+                        st.markdown(f"📄 {f['name']}")
         
-        # Display message content
         st.markdown(message['content'])
         
-        # Display response images
         if not is_user and message.get('response_images'):
             st.markdown("---")
-            st.markdown("** Analyzed Images:**")
+            st.markdown("**Analyzed Images:**")
             cols = st.columns(min(len(message['response_images']), 3))
             for idx, (img, label) in enumerate(message['response_images']):
                 with cols[idx % 3]:
                     st.image(img, caption=label, use_column_width=True)
         
-        # Display references
         if not is_user and message.get('references'):
             display_references(message['references'])
         
-        # Display knowledge graph
         if not is_user and message.get('entities') and len(message['entities']) > 1:
-            with st.expander(" Knowledge Graph", expanded=False):
+            with st.expander("Knowledge Graph", expanded=False):
                 fig = create_knowledge_graph(message['entities'], message.get('relationships', []))
                 st.plotly_chart(fig, use_container_width=True)
         
@@ -742,7 +735,7 @@ def main():
     
     # Sidebar
     with st.sidebar:
-        st.title(" Configuration")
+        st.title("Configuration")
         
         api_key_input = st.text_input(
             "Gemini API Key",
@@ -757,14 +750,34 @@ def main():
                 if model:
                     st.session_state.api_key = api_key_input
                     st.session_state.model = model
-                    st.success(" API Configured!")
+                    st.success("API Configured!")
             else:
                 st.error("Please enter an API key")
         
         st.markdown("---")
         
+        # Analysis Mode Selection
+        st.markdown("### Analysis Mode")
+        analysis_mode = st.selectbox(
+            "Select mode",
+            ["General", "Microstructure Analysis", "Process Design", "Troubleshooting", "Comparison"],
+            key="analysis_mode"
+        )
+        
+        mode_map = {
+            "General": "general",
+            "Microstructure Analysis": "microstructure",
+            "Process Design": "process_design",
+            "Troubleshooting": "troubleshooting",
+            "Comparison": "comparison"
+        }
+        
+        st.session_state.current_mode = mode_map[analysis_mode]
+        
+        st.markdown("---")
+        
         # Stats
-        st.markdown("###  Session Stats")
+        st.markdown("### Session Stats")
         col1, col2 = st.columns(2)
         with col1:
             st.markdown('<div class="metric-card">', unsafe_allow_html=True)
@@ -778,71 +791,174 @@ def main():
         
         st.markdown("---")
         
-        # Features
-        st.markdown("###  Features")
-        st.markdown("""
-        <div style='background: white; padding: 1rem; border-radius: 0.5rem;'>
-        •  <b>Smart Image Search</b><br>
-        •  <b>Knowledge Graphs</b><br>
-        •  <b>Reference Tracking</b><br>
-        •  <b>Visual Analytics</b><br>
-        •  <b>PDF Processing</b><br>
-        </div>
-        """, unsafe_allow_html=True)
+        # Quick Access Tools
+        st.markdown("### Quick Access")
+        
+        if st.button("Process Database", use_container_width=True):
+            st.session_state.show_process_db = True
+        
+        if st.button("Material Properties", use_container_width=True):
+            st.session_state.show_material_db = True
+        
+        if st.button("Process Comparison", use_container_width=True):
+            st.session_state.show_comparison = True
         
         st.markdown("---")
         
         # Example queries
-        st.markdown("###  Try These")
-        examples = [
-            "Show me a cold spray diagram",
-            "Explain CSAM microstructure",
-            "Display UAM process",
-            "Compare FSAM and AFSD"
-        ]
-        for example in examples:
-            if st.button(f" {example}", use_container_width=True, key=example):
+        st.markdown("### Example Queries")
+        examples = {
+            "Microstructure": "Analyze this microstructure for bonding quality",
+            "Parameters": "What are optimal CSAM parameters for aluminum?",
+            "Troubleshooting": "How to reduce porosity in CSAM coatings?",
+            "Comparison": "Compare CSAM vs UAM for copper deposition"
+        }
+        
+        for category, example in examples.items():
+            if st.button(f"{example[:30]}...", use_container_width=True, key=f"ex_{category}"):
                 st.session_state.example_query = example
         
         st.markdown("---")
         
         # Global knowledge graph
         if len(st.session_state.knowledge_graph) > 1:
-            if st.button(" View Global Knowledge Graph", use_container_width=True):
+            if st.button("View Global Knowledge Graph", use_container_width=True):
                 st.session_state.show_global_graph = True
         
         st.markdown("---")
         
-        # Clear chat
-        if st.button(" Clear Chat", use_container_width=True):
+        if st.button("Clear Chat", use_container_width=True):
             st.session_state.messages = []
             st.session_state.knowledge_graph = defaultdict(list)
+            st.session_state.conversation_context = []
             st.rerun()
         
         st.markdown("---")
-        st.caption(" SolidAdditive AI • Powered by Gemini 2.0")
+        st.caption("SSAM AI Pro • Solid-State AM Exclusively")
+        st.caption("⚠ CSAM • UAM • FSAM • AFSD Only")
     
     # Main content
-    st.title(" SolidAdditive AI")
+    st.title("SolidAdditive AI Pro")
     st.markdown("""
     <div style='background: rgba(255, 255, 255, 0.1); padding: 1rem; border-radius: 0.5rem; margin-bottom: 1rem;'>
         <p style='color: white; margin: 0;'>
-            <b>Advanced AI for Solid-State Additive Manufacturing</b><br>
-            Ask questions, analyze images, and explore knowledge graphs! 
+            <b>Specialized AI for Solid-State Additive Manufacturing ONLY</b><br>
+            <span style='color: #fbbf24;'>⚠ CSAM • UAM • FSAM • AFSD EXCLUSIVELY</span><br>
+            <small>This system does NOT cover fusion-based AM (SLS, DMLS, EBM, FDM, SLA, etc.)</small>
         </p>
     </div>
     """, unsafe_allow_html=True)
     
-    # Check API configuration
     if not st.session_state.api_key:
-        st.warning(" Please configure your Gemini API key in the sidebar to get started.")
+        st.warning("Please configure your Gemini API key in the sidebar to get started.")
         st.info("Get your API key from: https://makersuite.google.com/app/apikey")
         return
     
-    # Display global knowledge graph if requested
+    # Show process database if requested
+    if st.session_state.get('show_process_db', False):
+        st.markdown("### Solid-State AM Process Database")
+        
+        process_tabs = st.tabs(list(SSAM_PROCESSES.keys()))
+        
+        for idx, (process_key, process_data) in enumerate(SSAM_PROCESSES.items()):
+            with process_tabs[idx]:
+                st.markdown(f"**{process_data['name']}**")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown(f"**Temperature Range:** {process_data['temperature_range']}")
+                    st.markdown(f"**Bonding Mechanism:** {process_data['bonding_mechanism']}")
+                    st.markdown(f"**Materials:** {', '.join(process_data['typical_materials'])}")
+                
+                with col2:
+                    st.markdown("**Advantages:**")
+                    for adv in process_data['advantages']:
+                        st.markdown(f"- {adv}")
+                
+                st.markdown("**Limitations:**")
+                for lim in process_data['limitations']:
+                    st.markdown(f"- {lim}")
+                
+                # Show parameter table
+                param_df = create_parameter_table(process_key)
+                if param_df is not None:
+                    st.markdown("**Typical Parameters:**")
+                    st.dataframe(param_df, use_container_width=True)
+        
+        if st.button("Close Database"):
+            st.session_state.show_process_db = False
+            st.rerun()
+    
+    # Show material database if requested
+    if st.session_state.get('show_material_db', False):
+        st.markdown("### Material Properties Database")
+        
+        material_tabs = st.tabs(list(MATERIAL_DATABASE.keys()))
+        
+        for idx, (material, props) in enumerate(MATERIAL_DATABASE.items()):
+            with material_tabs[idx]:
+                st.markdown(f"**{material}**")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown(f"**Density:** {props['density']}")
+                    st.markdown(f"**Melting Point:** {props['melting_point']}")
+                    st.markdown(f"**Thermal Conductivity:** {props['thermal_conductivity']}")
+                
+                with col2:
+                    st.markdown(f"**Yield Strength:** {props['yield_strength']}")
+                    st.markdown(f"**SSAM Compatibility:** {', '.join(props['ssam_compatibility'])}")
+                
+                st.markdown(f"**Applications:** {props['common_applications']}")
+        
+        if st.button("Close Material Database"):
+            st.session_state.show_material_db = False
+            st.rerun()
+    
+    # Show process comparison if requested
+    if st.session_state.get('show_comparison', False):
+        st.markdown("### Process Comparison Tool")
+        
+        selected_processes = st.multiselect(
+            "Select processes to compare",
+            list(SSAM_PROCESSES.keys()),
+            default=list(SSAM_PROCESSES.keys())[:2]
+        )
+        
+        if len(selected_processes) >= 2:
+            fig = create_process_comparison_chart(selected_processes)
+            if fig:
+                st.plotly_chart(fig, use_container_width=True)
+            
+            # Detailed comparison table
+            st.markdown("**Detailed Comparison:**")
+            
+            comparison_data = {
+                'Aspect': ['Temperature Range', 'Bonding Mechanism', 'Typical Materials', 'Main Advantages', 'Main Limitations']
+            }
+            
+            for process in selected_processes:
+                if process in SSAM_PROCESSES:
+                    p = SSAM_PROCESSES[process]
+                    comparison_data[process] = [
+                        p['temperature_range'],
+                        p['bonding_mechanism'],
+                        ', '.join(p['typical_materials'][:3]),
+                        ', '.join(p['advantages'][:2]),
+                        ', '.join(p['limitations'][:2])
+                    ]
+            
+            comp_df = pd.DataFrame(comparison_data)
+            st.dataframe(comp_df, use_container_width=True)
+        
+        if st.button("Close Comparison"):
+            st.session_state.show_comparison = False
+            st.rerun()
+    
+    # Show global knowledge graph if requested
     if st.session_state.get('show_global_graph', False):
         st.markdown('<div class="knowledge-graph-container">', unsafe_allow_html=True)
-        st.markdown("###  Global Knowledge Graph")
+        st.markdown("### Global Knowledge Graph")
         st.markdown("*All concepts discussed in this session*")
         
         all_entities = list(st.session_state.knowledge_graph.keys())
@@ -866,16 +982,16 @@ def main():
         display_message(msg, is_user=(msg['role'] == 'user'))
     
     # File upload section
-    with st.expander(" Upload Files (Images or PDFs)", expanded=False):
+    with st.expander("Upload Files (Images or PDFs)", expanded=False):
         uploaded_files = st.file_uploader(
-            "Choose files to analyze",
-            type=['png', 'jpg', 'jpeg', 'gif', 'webp', 'pdf'],
+            "Upload images of microstructures, processes, or technical PDFs",
+            type=['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tiff', 'pdf'],
             accept_multiple_files=True,
-            help="Upload images or PDF documents for analysis"
+            help="Upload images for analysis or PDFs for text extraction"
         )
     
     # Chat input
-    user_input = st.chat_input("Ask me anything about solid-state additive manufacturing...")
+    user_input = st.chat_input(f"Ask about solid-state AM ({analysis_mode} mode)...")
     
     # Handle example query
     if st.session_state.get('example_query'):
@@ -909,11 +1025,13 @@ def main():
         })
         
         # Get AI response
-        with st.spinner(" Analyzing and generating response..."):
+        current_mode = st.session_state.get('current_mode', 'general')
+        with st.spinner(f"Analyzing in {analysis_mode} mode..."):
             ai_response, response_images, references, entities, relationships = get_gemini_response(
                 user_input,
                 images=images,
-                pdf_files=pdf_files
+                pdf_files=pdf_files,
+                mode=current_mode
             )
         
         # Add AI message
