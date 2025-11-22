@@ -55,9 +55,12 @@ def configure_gemini(api_key):
         )
         
         # Model with Google Search grounding for finding and showing images
+        from google.generativeai.types import Tool
+        search_tool = Tool(google_search=True)
+        
         search_model = genai.GenerativeModel(
             'gemini-2.5-flash',
-            tools='google_search_retrieval',  # THIS IS THE KEY - enables Google Search with images
+            tools=[search_tool],  # THIS IS THE KEY - enables Google Search with images
             generation_config={
                 'temperature': 0.7,
                 'top_p': 0.95,
