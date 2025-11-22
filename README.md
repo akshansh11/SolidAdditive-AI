@@ -730,7 +730,7 @@ outside the scope."
 
 ```
 solid-additive-ai-pro/
-├── solidadditive_pro.py           # Main application (RECOMMENDED)
+├── main.py                        # Main application (RECOMMENDED)
 ├── solidadditive_enhanced.py      # Legacy version (deprecated)
 ├── requirements.txt               # Python dependencies
 ├── README.md                      # This file
