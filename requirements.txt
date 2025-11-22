@@ -6,3 +6,6 @@ PyMuPDF
 requests
 numpy
 duckduckgo-search
+plotly
+networkx
+kaleido
