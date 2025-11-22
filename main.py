@@ -47,28 +47,57 @@ def configure_gemini(api_key):
         return None
 
 def search_google_images_simple(query, num_results=3):
-    """Simple Google Images search using DuckDuckGo (no API key needed)"""
+    """Search for images using multiple methods"""
+    image_urls = []
+    
+    # Method 1: Try DuckDuckGo
     try:
         from duckduckgo_search import DDGS
-        
+        st.info("Trying DuckDuckGo search...")
         with DDGS() as ddgs:
             results = list(ddgs.images(query, max_results=num_results))
             image_urls = [r['image'] for r in results if 'image' in r]
-            return image_urls
-    except:
-        pass
+            if image_urls:
+                st.success(f"DuckDuckGo found {len(image_urls)} images")
+                return image_urls
+    except Exception as e:
+        st.warning(f"DuckDuckGo failed: {str(e)}")
     
-    # Fallback: Try Bing scraping
+    # Method 2: Try Bing scraping
     try:
+        st.info("Trying Bing search...")
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         search_url = f"https://www.bing.com/images/search?q={requests.utils.quote(query)}&FORM=HDRSC2"
         response = requests.get(search_url, headers=headers, timeout=10)
         
         # Extract murl (media URL) from Bing results
         urls = re.findall(r'"murl":"([^"]+)"', response.text)
-        return urls[:num_results]
-    except:
-        pass
+        if urls:
+            image_urls = urls[:num_results]
+            st.success(f"Bing found {len(image_urls)} images")
+            return image_urls
+    except Exception as e:
+        st.warning(f"Bing failed: {str(e)}")
+    
+    # Method 3: Use hardcoded URLs for common queries
+    known_urls = {
+        'cold spray': ['https://upload.wikimedia.org/wikipedia/commons/3/3e/Cold_spray_diagram.svg'],
+        'csam': ['https://upload.wikimedia.org/wikipedia/commons/3/3e/Cold_spray_diagram.svg'],
+        'microstructure': [
+            'https://www.researchgate.net/publication/326284434/figure/fig2/AS:646689899421696@1531197765496/Cold-spray-microstructure.png',
+            'https://www.researchgate.net/publication/339486642/figure/fig1/AS:862318445121536@1582640155875/Microstructure-of-cold-sprayed-coating.png'
+        ]
+    }
+    
+    query_lower = query.lower()
+    for keyword, urls in known_urls.items():
+        if keyword in query_lower:
+            st.info(f"Using known URLs for '{keyword}'")
+            return urls
+    
+    st.warning("Could not find images through search. Please:")
+    st.markdown("1. Paste a direct image URL in your message")
+    st.markdown("2. Upload an image file")
     
     return []
 
