@@ -104,12 +104,16 @@ def search_google_images_simple(query, num_results=3):
 def download_image(url):
     """Download image from URL"""
     try:
+        st.info(f"Attempting to download: {url[:100]}")
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Referer': 'https://www.google.com/'
+            'Referer': 'https://www.google.com/',
+            'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8'
         }
         response = requests.get(url, headers=headers, timeout=20, allow_redirects=True)
         response.raise_for_status()
+        
+        st.info(f"Downloaded {len(response.content)} bytes")
         
         image = Image.open(io.BytesIO(response.content))
         if image.mode not in ('RGB', 'RGBA'):
@@ -122,8 +126,10 @@ def download_image(url):
             new_size = tuple(int(dim * ratio) for dim in image.size)
             image = image.resize(new_size, Image.Resampling.LANCZOS)
         
+        st.success(f"Successfully loaded image: {image.size}")
         return image
     except Exception as e:
+        st.error(f"Failed to download {url[:80]}: {str(e)}")
         return None
 
 def extract_urls_from_text(text):
@@ -210,20 +216,40 @@ def get_gemini_response(prompt, images=None, pdf_files=None):
             if search_query:
                 st.info(f"Searching for: {search_query}")
                 
-                # Search for images
-                image_urls = search_google_images_simple(f"{search_query} solid state additive manufacturing", num_results=3)
+                # First, check if we have known URLs for this query
+                known_urls_map = {
+                    'cold spray': [
+                        'https://upload.wikimedia.org/wikipedia/commons/3/3e/Cold_spray_diagram.svg',
+                        'https://www.researchgate.net/profile/Rocco-Lupoi/publication/280921943/figure/fig1/AS:614292107042816@1523469396138/Schematic-representation-of-the-cold-spray-process.png'
+                    ],
+                    'csam': [
+                        'https://upload.wikimedia.org/wikipedia/commons/3/3e/Cold_spray_diagram.svg'
+                    ],
+                    'microstructure': [
+                        'https://www.researchgate.net/publication/326284434/figure/fig2/AS:646689899421696@1531197765496/SEM-image-of-cold-spray-coating-microstructure.png'
+                    ]
+                }
+                
+                image_urls = []
+                for keyword, urls in known_urls_map.items():
+                    if keyword in search_query.lower():
+                        st.success(f"Using known URLs for '{keyword}'")
+                        image_urls = urls
+                        break
+                
+                # If no known URLs, try searching
+                if not image_urls:
+                    image_urls = search_google_images_simple(f"{search_query} solid state additive manufacturing", num_results=3)
                 
                 if image_urls:
-                    st.info(f"Found {len(image_urls)} images")
+                    st.info(f"Found {len(image_urls)} image URL(s)")
                     for url in image_urls:
-                        st.info(f"Downloading: {url[:80]}...")
                         img = download_image(url)
                         if img:
                             all_images.append((img, f"Search: {url[:50]}..."))
-                            st.success("Downloaded!")
                 
                 if not all_images:
-                    st.warning("Could not find images. Try:")
+                    st.warning("Could not download images. Try:")
                     st.markdown("- Upload an image file")
                     st.markdown("- Paste a direct image URL")
                     st.markdown(f"- Search Google for '{search_query}' and paste an image URL")
