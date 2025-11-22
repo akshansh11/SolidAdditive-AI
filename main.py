@@ -6,7 +6,8 @@ from datetime import datetime
 import re
 import requests
 import fitz  # PyMuPDF
-import traceback
+from serpapi import GoogleSearch
+import os
 
 # Page config
 st.set_page_config(
@@ -36,55 +37,66 @@ if 'api_key' not in st.session_state:
     st.session_state.api_key = None
 if 'model' not in st.session_state:
     st.session_state.model = None
-if 'search_model' not in st.session_state:
-    st.session_state.search_model = None
 
 def configure_gemini(api_key):
-    """Configure Gemini with Google Search grounding"""
+    """Configure Gemini"""
     try:
         genai.configure(api_key=api_key)
-        
-        # Regular model for analyzing uploaded images
-        model = genai.GenerativeModel(
-            'gemini-2.0-flash-exp',
-            generation_config={
-                'temperature': 0.7,
-                'top_p': 0.95,
-                'max_output_tokens': 8192,
-            }
-        )
-        
-        # Model with Google Search grounding for finding and showing images
-        from google.generativeai.types import Tool
-        search_tool = Tool(google_search=True)
-        
-        search_model = genai.GenerativeModel(
-            'gemini-2.5-flash',
-            tools=[search_tool],  # THIS IS THE KEY - enables Google Search with images
-            generation_config={
-                'temperature': 0.7,
-                'top_p': 0.95,
-                'max_output_tokens': 8192,
-            }
-        )
-        
-        return model, search_model
+        model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        return model
     except Exception as e:
         st.error(f"Error: {str(e)}")
-        return None, None
+        return None
+
+def search_google_images_simple(query, num_results=3):
+    """Simple Google Images search using DuckDuckGo (no API key needed)"""
+    try:
+        from duckduckgo_search import DDGS
+        
+        with DDGS() as ddgs:
+            results = list(ddgs.images(query, max_results=num_results))
+            image_urls = [r['image'] for r in results if 'image' in r]
+            return image_urls
+    except:
+        pass
+    
+    # Fallback: Try Bing scraping
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        search_url = f"https://www.bing.com/images/search?q={requests.utils.quote(query)}&FORM=HDRSC2"
+        response = requests.get(search_url, headers=headers, timeout=10)
+        
+        # Extract murl (media URL) from Bing results
+        urls = re.findall(r'"murl":"([^"]+)"', response.text)
+        return urls[:num_results]
+    except:
+        pass
+    
+    return []
 
 def download_image(url):
     """Download image from URL"""
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        response = requests.get(url, headers=headers, timeout=20)
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Referer': 'https://www.google.com/'
+        }
+        response = requests.get(url, headers=headers, timeout=20, allow_redirects=True)
         response.raise_for_status()
+        
         image = Image.open(io.BytesIO(response.content))
         if image.mode not in ('RGB', 'RGBA'):
             image = image.convert('RGB')
+        
+        # Resize if too large
+        max_size = 1200
+        if max(image.size) > max_size:
+            ratio = max_size / max(image.size)
+            new_size = tuple(int(dim * ratio) for dim in image.size)
+            image = image.resize(new_size, Image.Resampling.LANCZOS)
+        
         return image
     except Exception as e:
-        st.error(f"Could not download: {str(e)}")
         return None
 
 def extract_urls_from_text(text):
@@ -92,25 +104,18 @@ def extract_urls_from_text(text):
     pattern = r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
     return re.findall(pattern, text)
 
-def extract_image_urls_from_response(response_text):
-    """Extract image URLs from Gemini's response"""
-    # Look for markdown image syntax
-    md_images = re.findall(r'!\[.*?\]\((https?://[^\s\)]+)\)', response_text)
-    
-    # Look for plain URLs that end with image extensions
-    url_pattern = r'http[s]?://[^\s<>"]+?\.(?:jpg|jpeg|png|gif|webp)'
-    direct_urls = re.findall(url_pattern, response_text, re.IGNORECASE)
-    
-    # Look for URLs in the response
-    all_urls = extract_urls_from_text(response_text)
-    image_urls = [url for url in all_urls if url.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp'))]
-    
-    return list(set(md_images + direct_urls + image_urls))
+def should_search_images(prompt):
+    """Check if user wants images"""
+    keywords = ['show', 'display', 'find', 'get', 'image', 'diagram', 'picture', 'photo', 'schematic']
+    return any(k in prompt.lower() for k in keywords)
 
-def should_use_search(prompt):
-    """Check if we should use Google Search grounding"""
-    search_keywords = ['show', 'display', 'find', 'search', 'get', 'image', 'diagram', 'picture', 'photo']
-    return any(keyword in prompt.lower() for keyword in search_keywords)
+def extract_search_query(prompt):
+    """Extract search query from prompt"""
+    # Remove common words
+    remove = ['show', 'display', 'find', 'get', 'me', 'an', 'a', 'the', 'image', 'of', 'picture', 'diagram', 'can', 'you', 'please']
+    words = prompt.lower().split()
+    search_words = [w for w in words if w not in remove and len(w) > 2]
+    return ' '.join(search_words)
 
 def process_image_file(uploaded_file):
     try:
@@ -144,21 +149,19 @@ def extract_pdf_images(pdf_file):
         return []
 
 def get_gemini_response(prompt, images=None, pdf_files=None):
-    """Get AI response - uses search model if needed"""
+    """Get AI response"""
     try:
         if not st.session_state.model:
             return "Configure API key first", None
         
-        content_parts = []
         all_images = []
         
         # Check for URLs in prompt
         urls = extract_urls_from_text(prompt)
-        url_images = []
         for url in urls:
             img = download_image(url)
             if img:
-                url_images.append((img, f"From URL: {url[:50]}..."))
+                all_images.append((img, f"URL: {url[:50]}..."))
                 st.success(f"Downloaded: {url[:60]}...")
         
         # Process PDFs
@@ -174,63 +177,52 @@ def get_gemini_response(prompt, images=None, pdf_files=None):
             for idx, img in enumerate(images):
                 all_images.append((img, f"Uploaded Image {idx + 1}"))
         
-        # Add URL images
-        all_images.extend(url_images)
+        # If user wants images and none provided, search for them
+        if should_search_images(prompt) and not all_images:
+            search_query = extract_search_query(prompt)
+            if search_query:
+                st.info(f"Searching for: {search_query}")
+                
+                # Search for images
+                image_urls = search_google_images_simple(f"{search_query} solid state additive manufacturing", num_results=3)
+                
+                if image_urls:
+                    st.info(f"Found {len(image_urls)} images")
+                    for url in image_urls:
+                        st.info(f"Downloading: {url[:80]}...")
+                        img = download_image(url)
+                        if img:
+                            all_images.append((img, f"Search: {url[:50]}..."))
+                            st.success("Downloaded!")
+                
+                if not all_images:
+                    st.warning("Could not find images. Try:")
+                    st.markdown("- Upload an image file")
+                    st.markdown("- Paste a direct image URL")
+                    st.markdown(f"- Search Google for '{search_query}' and paste an image URL")
         
-        # If user wants to search for images and no images provided, use search model
-        if should_use_search(prompt) and not all_images:
-            st.info("Using Google Search to find images...")
-            
-            # Use the search-enabled model
-            search_prompt = f"""You are an expert in solid-state additive manufacturing (CSAM, UAM, FSAM, AFSD).
-
-User asked: {prompt}
-
-Please search Google for relevant images and provide:
-1. Direct image URLs that you find
-2. A detailed technical explanation of the topic
-3. Analysis of what these images show
-
-Focus on solid-state AM processes only. Provide actual image URLs that can be downloaded."""
-
-            response = st.session_state.search_model.generate_content(search_prompt)
-            response_text = response.text
-            
-            # Extract image URLs from the response
-            image_urls = extract_image_urls_from_response(response_text)
-            
-            st.info(f"Found {len(image_urls)} image URLs in response")
-            
-            # Download the images
-            for url in image_urls[:5]:  # Limit to 5 images
-                st.info(f"Downloading: {url[:80]}...")
-                img = download_image(url)
-                if img:
-                    all_images.append((img, f"Search result: {url[:50]}..."))
-                    st.success("Downloaded!")
-            
-            return response_text, all_images
-        
-        # Otherwise use regular model with images
-        else:
-            prompt_text = f"""You are an expert in solid-state additive manufacturing (CSAM, UAM, FSAM, AFSD).
+        # Build prompt
+        prompt_text = f"""You are an expert in solid-state additive manufacturing (CSAM, UAM, FSAM, AFSD).
 
 User: {prompt}
 
 CRITICAL: When images are provided, analyze them in detail. The images ARE displayed to the user.
-Describe specific regions, features, components visible in the images."""
+Describe specific regions, features, and components you see in the images."""
 
-            if all_images:
-                prompt_text += f"\n\n{len(all_images)} images are being shown. Analyze them."
-            
-            content_parts.append(prompt_text)
-            for img, _ in all_images:
-                content_parts.append(img)
-            
-            response = st.session_state.model.generate_content(content_parts)
-            return response.text, all_images
+        if all_images:
+            prompt_text += f"\n\n{len(all_images)} images are shown. Analyze them thoroughly."
+        
+        # Build content
+        content_parts = [prompt_text]
+        for img, _ in all_images:
+            content_parts.append(img)
+        
+        # Generate response
+        response = st.session_state.model.generate_content(content_parts)
+        return response.text, all_images
     
     except Exception as e:
+        import traceback
         error_msg = f"Error: {str(e)}\n{traceback.format_exc()}"
         st.error(error_msg)
         return error_msg, None
@@ -247,7 +239,7 @@ def display_message(message, is_user=False):
         if is_user and message.get('files'):
             st.markdown("**Files:**")
             for f in message['files']:
-                if f['data']:
+                if f.get('data'):
                     st.image(f['data'], caption=f['name'], width=150)
         
         st.markdown(message['content'])
@@ -268,37 +260,37 @@ def main():
         
         if st.button("Configure"):
             if api_key_input:
-                model, search_model = configure_gemini(api_key_input)
-                if model and search_model:
+                model = configure_gemini(api_key_input)
+                if model:
                     st.session_state.api_key = api_key_input
                     st.session_state.model = model
-                    st.session_state.search_model = search_model
-                    st.success("Configured with Google Search!")
+                    st.success("Configured!")
         
         st.markdown("---")
         
         st.markdown("### How It Works")
-        st.markdown("Uses Gemini's built-in **Google Search** capability")
-        st.markdown("When you ask to show images, it:")
-        st.markdown("1. Searches Google")
-        st.markdown("2. Finds image URLs")
-        st.markdown("3. Downloads and displays them")
+        st.markdown("- Searches Bing/DuckDuckGo for images")
+        st.markdown("- Downloads and displays them")
+        st.markdown("- AI analyzes the images")
         
         st.markdown("---")
         
         st.markdown("### Try These")
-        st.code("Show me CSAM diagram")
-        st.code("Display cold spray process")
-        st.code("Find UAM equipment image")
+        st.code("Show cold spray diagram")
+        st.code("Display CSAM process")
+        st.code("Find UAM equipment")
         
         st.markdown("---")
         
-        if st.button("Clear Chat"):
+        if st.button("Clear"):
             st.session_state.messages = []
             st.rerun()
+        
+        st.markdown("---")
+        st.caption("Uses Bing/DuckDuckGo image search")
     
     st.title("SolidAdditive AI")
-    st.markdown("**Uses Gemini's Google Search - just ask to show images!**")
+    st.markdown("**Ask to 'Show CSAM diagram' - will search and display images!**")
     
     if not st.session_state.api_key:
         st.warning("Configure API key in sidebar")
@@ -313,7 +305,7 @@ def main():
         uploaded_files = st.file_uploader("Images or PDFs", type=['png', 'jpg', 'jpeg', 'gif', 'webp', 'pdf'], accept_multiple_files=True)
     
     # Chat input
-    user_input = st.chat_input("Ask to 'Show me CSAM diagram'")
+    user_input = st.chat_input("Ask: 'Show cold spray diagram'")
     
     if user_input:
         images = []
@@ -341,7 +333,7 @@ def main():
         })
         
         # Get response
-        with st.spinner("Searching and processing..."):
+        with st.spinner("Searching and analyzing..."):
             ai_response, response_images = get_gemini_response(user_input, images=images, pdf_files=pdf_files)
         
         # Add AI message
