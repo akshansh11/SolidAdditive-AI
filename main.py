@@ -6,7 +6,6 @@ from datetime import datetime
 import re
 import requests
 import fitz  # PyMuPDF
-import base64
 
 # Page config
 st.set_page_config(
@@ -29,23 +28,6 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# TESTED WORKING IMAGE URLs - These are verified to work
-KNOWN_IMAGES = {
-    'cold spray': [
-        'https://i.imgur.com/9g8fK2w.png',  # Cold spray diagram backup
-        'https://upload.wikimedia.org/wikipedia/commons/thumb/3/3e/Cold_spray_diagram.svg/500px-Cold_spray_diagram.svg.png',
-    ],
-    'csam': [
-        'https://upload.wikimedia.org/wikipedia/commons/thumb/3/3e/Cold_spray_diagram.svg/500px-Cold_spray_diagram.svg.png',
-    ],
-    'uam': [
-        'https://i.imgur.com/placeholder.png',  # Placeholder
-    ],
-    'fsam': [
-        'https://i.imgur.com/placeholder2.png',  # Placeholder
-    ]
-}
-
 # Session state
 if 'messages' not in st.session_state:
     st.session_state.messages = []
@@ -64,78 +46,91 @@ def configure_gemini(api_key):
         st.error(f"Error: {str(e)}")
         return None
 
-def download_image(url, max_retries=3):
-    """Download image with retries and multiple methods"""
+def search_google_images_simple(query, num_results=3):
+    """Search for images using multiple methods"""
+    image_urls = []
     
-    # Try with requests first
-    for attempt in range(max_retries):
-        try:
-            st.info(f"Download attempt {attempt + 1}/{max_retries}: {url[:80]}")
-            
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Connection': 'keep-alive',
-                'Referer': 'https://www.google.com/',
-                'Sec-Fetch-Dest': 'image',
-                'Sec-Fetch-Mode': 'no-cors',
-                'Sec-Fetch-Site': 'cross-site'
-            }
-            
-            session = requests.Session()
-            response = session.get(url, headers=headers, timeout=30, allow_redirects=True, verify=True)
-            response.raise_for_status()
-            
-            content_type = response.headers.get('content-type', '')
-            st.info(f"Content-Type: {content_type}, Size: {len(response.content)} bytes")
-            
-            # Handle SVG files
-            if 'svg' in content_type or url.endswith('.svg'):
-                st.warning("SVG detected - converting to PNG")
-                # For SVG, we'd need cairosvg or similar, skip for now
-                continue
-            
-            # Try to open as image
-            image = Image.open(io.BytesIO(response.content))
-            
-            # Convert mode if needed
-            if image.mode not in ('RGB', 'RGBA'):
-                st.info(f"Converting from {image.mode} to RGB")
-                image = image.convert('RGB')
-            
-            # Resize if too large
-            max_size = 1200
-            if max(image.size) > max_size:
-                ratio = max_size / max(image.size)
-                new_size = tuple(int(dim * ratio) for dim in image.size)
-                image = image.resize(new_size, Image.Resampling.LANCZOS)
-                st.info(f"Resized to {new_size}")
-            
-            st.success(f"Successfully loaded: {image.size}")
-            return image
-            
-        except Exception as e:
-            st.warning(f"Attempt {attempt + 1} failed: {str(e)}")
-            if attempt < max_retries - 1:
-                import time
-                time.sleep(1)
-            continue
+    # Method 1: Try DuckDuckGo
+    try:
+        from duckduckgo_search import DDGS
+        st.info("Trying DuckDuckGo search...")
+        with DDGS() as ddgs:
+            results = list(ddgs.images(query, max_results=num_results))
+            image_urls = [r['image'] for r in results if 'image' in r]
+            if image_urls:
+                st.success(f"DuckDuckGo found {len(image_urls)} images")
+                return image_urls
+    except Exception as e:
+        st.warning(f"DuckDuckGo failed: {str(e)}")
     
-    st.error(f"All {max_retries} download attempts failed for {url[:80]}")
-    return None
-
-def get_images_for_query(query):
-    """Get known image URLs for a query"""
+    # Method 2: Try Bing scraping
+    try:
+        st.info("Trying Bing search...")
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        search_url = f"https://www.bing.com/images/search?q={requests.utils.quote(query)}&FORM=HDRSC2"
+        response = requests.get(search_url, headers=headers, timeout=10)
+        
+        # Extract murl (media URL) from Bing results
+        urls = re.findall(r'"murl":"([^"]+)"', response.text)
+        if urls:
+            image_urls = urls[:num_results]
+            st.success(f"Bing found {len(image_urls)} images")
+            return image_urls
+    except Exception as e:
+        st.warning(f"Bing failed: {str(e)}")
+    
+    # Method 3: Use hardcoded URLs for common queries
+    known_urls = {
+        'cold spray': ['https://upload.wikimedia.org/wikipedia/commons/3/3e/Cold_spray_diagram.svg'],
+        'csam': ['https://upload.wikimedia.org/wikipedia/commons/3/3e/Cold_spray_diagram.svg'],
+        'microstructure': [
+            'https://www.researchgate.net/publication/326284434/figure/fig2/AS:646689899421696@1531197765496/Cold-spray-microstructure.png',
+            'https://www.researchgate.net/publication/339486642/figure/fig1/AS:862318445121536@1582640155875/Microstructure-of-cold-sprayed-coating.png'
+        ]
+    }
+    
     query_lower = query.lower()
-    
-    for keyword, urls in KNOWN_IMAGES.items():
+    for keyword, urls in known_urls.items():
         if keyword in query_lower:
-            st.success(f"Found {len(urls)} known URL(s) for '{keyword}'")
+            st.info(f"Using known URLs for '{keyword}'")
             return urls
     
+    st.warning("Could not find images through search. Please:")
+    st.markdown("1. Paste a direct image URL in your message")
+    st.markdown("2. Upload an image file")
+    
     return []
+
+def download_image(url):
+    """Download image from URL"""
+    try:
+        st.info(f"Attempting to download: {url[:100]}")
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Referer': 'https://www.google.com/',
+            'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8'
+        }
+        response = requests.get(url, headers=headers, timeout=20, allow_redirects=True)
+        response.raise_for_status()
+        
+        st.info(f"Downloaded {len(response.content)} bytes")
+        
+        image = Image.open(io.BytesIO(response.content))
+        if image.mode not in ('RGB', 'RGBA'):
+            image = image.convert('RGB')
+        
+        # Resize if too large
+        max_size = 1200
+        if max(image.size) > max_size:
+            ratio = max_size / max(image.size)
+            new_size = tuple(int(dim * ratio) for dim in image.size)
+            image = image.resize(new_size, Image.Resampling.LANCZOS)
+        
+        st.success(f"Successfully loaded image: {image.size}")
+        return image
+    except Exception as e:
+        st.error(f"Failed to download {url[:80]}: {str(e)}")
+        return None
 
 def extract_urls_from_text(text):
     """Extract URLs from text"""
@@ -144,8 +139,16 @@ def extract_urls_from_text(text):
 
 def should_search_images(prompt):
     """Check if user wants images"""
-    keywords = ['show', 'display', 'find', 'get', 'image', 'diagram', 'picture', 'photo']
+    keywords = ['show', 'display', 'find', 'get', 'image', 'diagram', 'picture', 'photo', 'schematic']
     return any(k in prompt.lower() for k in keywords)
+
+def extract_search_query(prompt):
+    """Extract search query from prompt"""
+    # Remove common words
+    remove = ['show', 'display', 'find', 'get', 'me', 'an', 'a', 'the', 'image', 'of', 'picture', 'diagram', 'can', 'you', 'please']
+    words = prompt.lower().split()
+    search_words = [w for w in words if w not in remove and len(w) > 2]
+    return ' '.join(search_words)
 
 def process_image_file(uploaded_file):
     try:
@@ -189,10 +192,10 @@ def get_gemini_response(prompt, images=None, pdf_files=None):
         # Check for URLs in prompt
         urls = extract_urls_from_text(prompt)
         for url in urls:
-            st.info(f"Found URL in prompt: {url}")
             img = download_image(url)
             if img:
                 all_images.append((img, f"URL: {url[:50]}..."))
+                st.success(f"Downloaded: {url[:60]}...")
         
         # Process PDFs
         if pdf_files:
@@ -207,25 +210,49 @@ def get_gemini_response(prompt, images=None, pdf_files=None):
             for idx, img in enumerate(images):
                 all_images.append((img, f"Uploaded Image {idx + 1}"))
         
-        # If user wants images and none provided, use known URLs
+        # If user wants images and none provided, search for them
         if should_search_images(prompt) and not all_images:
-            st.info("Looking for known images...")
-            image_urls = get_images_for_query(prompt)
-            
-            if image_urls:
-                st.info(f"Trying {len(image_urls)} known URL(s)")
-                for url in image_urls:
-                    img = download_image(url)
-                    if img:
-                        all_images.append((img, f"Reference: {url[:50]}..."))
-                        break  # Got one image, that's enough
-            
-            if not all_images:
-                st.warning("⚠️ Could not load images. Please:")
-                st.markdown("**Option 1:** Paste a direct image URL in your message")
-                st.markdown("**Option 2:** Upload an image file using the uploader")
-                st.markdown("**Option 3:** Try these working URLs:")
-                st.code("https://upload.wikimedia.org/wikipedia/commons/thumb/3/3e/Cold_spray_diagram.svg/500px-Cold_spray_diagram.svg.png")
+            search_query = extract_search_query(prompt)
+            if search_query:
+                st.info(f"Searching for: {search_query}")
+                
+                # First, check if we have known URLs for this query
+                known_urls_map = {
+                    'cold spray': [
+                        'https://upload.wikimedia.org/wikipedia/commons/3/3e/Cold_spray_diagram.svg',
+                        'https://www.researchgate.net/profile/Rocco-Lupoi/publication/280921943/figure/fig1/AS:614292107042816@1523469396138/Schematic-representation-of-the-cold-spray-process.png'
+                    ],
+                    'csam': [
+                        'https://upload.wikimedia.org/wikipedia/commons/3/3e/Cold_spray_diagram.svg'
+                    ],
+                    'microstructure': [
+                        'https://www.researchgate.net/publication/326284434/figure/fig2/AS:646689899421696@1531197765496/SEM-image-of-cold-spray-coating-microstructure.png'
+                    ]
+                }
+                
+                image_urls = []
+                for keyword, urls in known_urls_map.items():
+                    if keyword in search_query.lower():
+                        st.success(f"Using known URLs for '{keyword}'")
+                        image_urls = urls
+                        break
+                
+                # If no known URLs, try searching
+                if not image_urls:
+                    image_urls = search_google_images_simple(f"{search_query} solid state additive manufacturing", num_results=3)
+                
+                if image_urls:
+                    st.info(f"Found {len(image_urls)} image URL(s)")
+                    for url in image_urls:
+                        img = download_image(url)
+                        if img:
+                            all_images.append((img, f"Search: {url[:50]}..."))
+                
+                if not all_images:
+                    st.warning("Could not download images. Try:")
+                    st.markdown("- Upload an image file")
+                    st.markdown("- Paste a direct image URL")
+                    st.markdown(f"- Search Google for '{search_query}' and paste an image URL")
         
         # Build prompt
         prompt_text = f"""You are an expert in solid-state additive manufacturing (CSAM, UAM, FSAM, AFSD).
@@ -294,24 +321,29 @@ def main():
         
         st.markdown("---")
         
-        st.markdown("### Working Image URL")
-        st.markdown("Copy and paste this in chat:")
-        st.code("https://upload.wikimedia.org/wikipedia/commons/thumb/3/3e/Cold_spray_diagram.svg/500px-Cold_spray_diagram.svg.png")
+        st.markdown("### How It Works")
+        st.markdown("- Searches Bing/DuckDuckGo for images")
+        st.markdown("- Downloads and displays them")
+        st.markdown("- AI analyzes the images")
         
         st.markdown("---")
         
         st.markdown("### Try These")
-        st.code("Show cold spray")
-        st.code("Show CSAM diagram")
+        st.code("Show cold spray diagram")
+        st.code("Display CSAM process")
+        st.code("Find UAM equipment")
         
         st.markdown("---")
         
         if st.button("Clear"):
             st.session_state.messages = []
             st.rerun()
+        
+        st.markdown("---")
+        st.caption("Uses Bing/DuckDuckGo image search")
     
     st.title("SolidAdditive AI")
-    st.markdown("**Paste this URL to test: https://upload.wikimedia.org/wikipedia/commons/thumb/3/3e/Cold_spray_diagram.svg/500px-Cold_spray_diagram.svg.png**")
+    st.markdown("**Ask to 'Show CSAM diagram' - will search and display images!**")
     
     if not st.session_state.api_key:
         st.warning("Configure API key in sidebar")
@@ -326,7 +358,7 @@ def main():
         uploaded_files = st.file_uploader("Images or PDFs", type=['png', 'jpg', 'jpeg', 'gif', 'webp', 'pdf'], accept_multiple_files=True)
     
     # Chat input
-    user_input = st.chat_input("Paste URL or type 'Show cold spray'")
+    user_input = st.chat_input("Ask: 'Show cold spray diagram'")
     
     if user_input:
         images = []
@@ -354,7 +386,7 @@ def main():
         })
         
         # Get response
-        with st.spinner("Processing..."):
+        with st.spinner("Searching and analyzing..."):
             ai_response, response_images = get_gemini_response(user_input, images=images, pdf_files=pdf_files)
         
         # Add AI message
